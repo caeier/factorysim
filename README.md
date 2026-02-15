@@ -2,7 +2,7 @@
 
 A browser-based tool for placing machines on a grid, connecting them with conveyor belts, and automatically optimizing the layout for minimal space and belt usage.
 
-**[Try it live](https://caeier.github.io/arjngf/)**
+**[Try it live](https://caeier.github.io/factorysim/)**
 
 ---
 
