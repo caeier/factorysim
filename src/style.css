@@ -115,7 +115,15 @@ body {
 }
 
 .tool-btn .icon {
-  font-size: 14px;
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+}
+
+.tool-btn .icon svg,
+.tool-btn svg {
+  display: inline-block;
+  vertical-align: middle;
 }
 
 /* Hotkey badges */

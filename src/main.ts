@@ -13,6 +13,20 @@ import { Renderer } from './renderer';
 import { runOptimizer } from './optimizer';
 import './style.css';
 
+// ─── SVG Icon definitions ────────────────────────────
+const ICONS = {
+  place: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>',
+  select: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 9l2-2 3 3L18 2"/><rect x="3" y="3" width="18" height="18" rx="2"/></svg>',
+  connect: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="3"/><circle cx="19" cy="12" r="3"/><line x1="8" y1="12" x2="16" y2="12"/></svg>',
+  delete: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>',
+  rotate: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>',
+  optimize: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>',
+  search: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>',
+  stop: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>',
+  save: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>',
+  folder: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>',
+} as const;
+
 // ─── State ───────────────────────────────────────────────
 
 const GRID_SIZE = 50;
@@ -66,16 +80,16 @@ app.innerHTML = `
     <div class="toolbar-group">
       <span class="toolbar-label">Mode</span>
       <button id="btn-place" class="tool-btn active" data-mode="place" title="Place Machine">
-        <span class="icon">⊞</span> Place <kbd>P</kbd>
+        <span class="icon">${ICONS.place}</span> Place <kbd>P</kbd>
       </button>
       <button id="btn-select" class="tool-btn" data-mode="select" title="Select/Move">
-        <span class="icon">⊡</span> Select <kbd>S</kbd>
+        <span class="icon">${ICONS.select}</span> Select <kbd>S</kbd>
       </button>
       <button id="btn-connect" class="tool-btn" data-mode="connect" title="Connect Ports">
-        <span class="icon">⟷</span> Connect <kbd>C</kbd>
+        <span class="icon">${ICONS.connect}</span> Connect <kbd>C</kbd>
       </button>
       <button id="btn-delete" class="tool-btn" data-mode="delete" title="Delete">
-        <span class="icon">✕</span> Delete <kbd>D</kbd>
+        <span class="icon">${ICONS.delete}</span> Delete <kbd>D</kbd>
       </button>
     </div>
     <div class="toolbar-divider"></div>
@@ -88,29 +102,29 @@ app.innerHTML = `
     <div class="toolbar-divider"></div>
     <div class="toolbar-group">
       <button id="btn-rotate" class="tool-btn" title="Rotate">
-        <span class="icon">↻</span> Rotate <kbd>R</kbd>
+        <span class="icon">${ICONS.rotate}</span> Rotate <kbd>R</kbd>
       </button>
     </div>
     <div class="toolbar-divider"></div>
     <div class="toolbar-group">
       <button id="btn-optimize" class="tool-btn optimize-btn" title="Auto-Arrange">
-        <span class="icon">⚡</span> Optimize <kbd>O</kbd>
+        <span class="icon">${ICONS.optimize}</span> Optimize <kbd>O</kbd>
       </button>
       <button id="btn-search-deeper" class="tool-btn deep-search-btn" title="Run longer optimizer search">
-        <span class="icon">🔍</span> Search Deeper
+        <span class="icon">${ICONS.search}</span> Search Deeper
       </button>
       <button id="btn-stop-search" class="tool-btn stop-search-btn" title="Stop continuous deep search" disabled>
-        <span class="icon">■</span> Stop
+        <span class="icon">${ICONS.stop}</span> Stop
       </button>
     </div>
     <div class="toolbar-divider"></div>
     <div class="toolbar-group">
       <span class="toolbar-label">File</span>
       <button id="btn-export" class="tool-btn" title="Export Layout">
-        <span class="icon">💾</span> Export
+        <span class="icon">${ICONS.save}</span> Export
       </button>
       <button id="btn-import" class="tool-btn" title="Import Layout">
-        <span class="icon">📂</span> Import
+        <span class="icon">${ICONS.folder}</span> Import
       </button>
       <input type="file" id="import-file" accept=".json" style="display:none" />
     </div>
@@ -706,9 +720,9 @@ async function runAutoOptimize(mode: OptimizeMode = 'normal'): Promise<void> {
   optimizeBtn.disabled = true;
   searchDeeperBtn.disabled = true;
   stopSearchBtn.disabled = !isDeep;
-  optimizeBtn.textContent = isDeep ? '⚡ Optimize' : '⚡ Optimizing...';
-  searchDeeperBtn.textContent = isDeep ? '🔍 Searching...' : '🔍 Search Deeper';
-  stopSearchBtn.textContent = '■ Stop';
+  optimizeBtn.innerHTML = isDeep ? `${ICONS.optimize} Optimize` : `${ICONS.optimize} Optimizing...`;
+  searchDeeperBtn.innerHTML = isDeep ? `${ICONS.search} Searching...` : `${ICONS.search} Search Deeper`;
+  stopSearchBtn.innerHTML = `${ICONS.stop} Stop`;
   statusText.textContent = isDeep
     ? 'Search Deeper started — running continuously from current layout...'
     : 'Running optimizer...';
@@ -823,9 +837,9 @@ async function runAutoOptimize(mode: OptimizeMode = 'normal'): Promise<void> {
     optimizeBtn.disabled = false;
     searchDeeperBtn.disabled = false;
     stopSearchBtn.disabled = true;
-    optimizeBtn.textContent = '⚡ Optimize';
-    searchDeeperBtn.textContent = '🔍 Search Deeper';
-    stopSearchBtn.textContent = '■ Stop';
+    optimizeBtn.innerHTML = `${ICONS.optimize} Optimize`;
+    searchDeeperBtn.innerHTML = `${ICONS.search} Search Deeper`;
+    stopSearchBtn.innerHTML = `${ICONS.stop} Stop`;
   }
 }
 
@@ -834,7 +848,7 @@ function requestDeepSearchStop(): void {
   stopDeepSearchRequested = true;
   const stopSearchBtn = document.getElementById('btn-stop-search') as HTMLButtonElement;
   stopSearchBtn.disabled = true;
-  stopSearchBtn.textContent = '■ Stopping...';
+  stopSearchBtn.innerHTML = `${ICONS.stop} Stopping...`;
   statusText.textContent = 'Stopping Search Deeper after current chunk...';
 }
 
