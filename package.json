@@ -1,0 +1,20 @@
+{
+  "name": "arjngf",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "typecheck": "tsc --noEmit",
+    "benchmark": "npx tsx src/benchmark.ts",
+    "compare:deep": "npx tsx src/deep_search_compare.ts",
+    "ablation:next-gains": "npx tsx src/ablation_next_gains.ts",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "typescript": "~5.9.3",
+    "vite": "^7.3.1",
+    "vite-plugin-singlefile": "^2.3.0"
+  }
+}
