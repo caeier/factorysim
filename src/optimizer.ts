@@ -262,6 +262,21 @@ export async function runOptimizer(
         ? budgetStart + config.timeBudgetMs
         : Number.POSITIVE_INFINITY;
     const shouldStopForBudget = (): boolean => config.mode === 'deep' && performance.now() >= budgetDeadline;
+    const usePhaseBudgetReserves = config.mode === 'deep' && Number.isFinite(config.timeBudgetMs);
+    const reserveForPhase2AndLaterMs = usePhaseBudgetReserves
+        ? Math.min(config.timeBudgetMs * 0.8, Math.max(200, config.timeBudgetMs * 0.32))
+        : 0;
+    const reserveForPhase4Ms = usePhaseBudgetReserves
+        ? Math.min(config.timeBudgetMs * 0.5, Math.max(120, config.timeBudgetMs * 0.14))
+        : 0;
+    const shouldStopPhase1ForBudget = (): boolean => (
+        shouldStopForBudget()
+        || (usePhaseBudgetReserves && performance.now() >= budgetDeadline - reserveForPhase2AndLaterMs)
+    );
+    const shouldStopPhase2ForBudget = (): boolean => (
+        shouldStopForBudget()
+        || (usePhaseBudgetReserves && performance.now() >= budgetDeadline - reserveForPhase4Ms)
+    );
     const beginPhase = (phase: OptimizerPhaseName): void => {
         if (!config.diagnostics) return;
         activePhase = {
@@ -391,11 +406,12 @@ export async function runOptimizer(
         }
 
         let kicked = seedMachines.map((m) => ({ ...m }));
+        let kickedConnections = connections.map((conn) => ({ ...conn }));
         const kickMoves = 1 + Math.floor(random() * 2);
         for (let i = 0; i < kickMoves; i++) {
             kicked = perturbSmart(
                 kicked,
-                connections,
+                kickedConnections,
                 W,
                 H,
                 random,
@@ -404,7 +420,9 @@ export async function runOptimizer(
                 new Set(fixedMachines.keys()),
             );
         }
-        if (scorePlacement(kicked, connections, W, H, useFastScore) < Infinity) {
+        if (scorePlacement(kicked, kickedConnections, W, H, useFastScore) < Infinity) {
+            connections.length = 0;
+            connections.push(...kickedConnections.map((conn) => ({ ...conn })));
             return kicked;
         }
         return seedMachines;
@@ -503,7 +521,7 @@ export async function runOptimizer(
             {
                 ...config.phase1SA,
                 random,
-                shouldStop: shouldStopForBudget,
+                shouldStop: shouldStopPhase1ForBudget,
                 operators: operatorConfig,
                 fixedMachineIds: new Set(fixedMachines.keys()),
             },
@@ -560,7 +578,7 @@ export async function runOptimizer(
             {
                 ...config.phase2SA,
                 random,
-                shouldStop: shouldStopForBudget,
+                shouldStop: shouldStopPhase2ForBudget,
                 operators: operatorConfig,
                 fixedMachineIds: new Set(fixedMachines.keys()),
             },
@@ -1933,6 +1951,20 @@ function layoutDistance(a: Machine[], b: Machine[]): number {
     return total / compared;
 }
 
+type CachedMachinePorts = ReturnType<typeof getMachinePorts>;
+
+function getMachinePortsCached(
+    machine: Machine,
+    cache: Map<string, CachedMachinePorts>,
+): CachedMachinePorts {
+    const key = `${machine.id}@${machine.x},${machine.y},${machine.orientation}`;
+    const cached = cache.get(key);
+    if (cached) return cached;
+    const ports = getMachinePorts(machine);
+    cache.set(key, ports);
+    return ports;
+}
+
 // ─────────────────────────────────────────────────────────
 // ORIENTATION OPTIMIZATION (A*-verified)
 // ─────────────────────────────────────────────────────────
@@ -2021,18 +2053,21 @@ function runSAAsync(
 ): Promise<Machine[]> {
     return new Promise((resolve) => {
         let current = startMachines.map((m) => ({ ...m }));
+        let currentConnections = connections.map((conn) => ({ ...conn }));
         const fixedMachineIds = config.fixedMachineIds ?? new Set<string>();
         if (fixedMachineIds.size > 0) {
             const fixedSnapshots = buildFixedMachineMap(current);
             enforceFixedMachines(current, fixedSnapshots);
         }
-        let currentScore = scorePlacement(current, connections, gridW, gridH, config.useFastScore);
+        let currentScore = scorePlacement(current, currentConnections, gridW, gridH, config.useFastScore);
         let best = current.map((m) => ({ ...m }));
+        let bestConnections = currentConnections.map((conn) => ({ ...conn }));
         let bestScore = currentScore;
         let bestLexic = best.map((m) => ({ ...m }));
+        let bestLexicConnections = bestConnections.map((conn) => ({ ...conn }));
         let bestLexicBreakdown = computeFastScoreBreakdown(
             bestLexic,
-            connections,
+            bestLexicConnections,
             new Map(bestLexic.map((machine) => [machine.id, machine])),
         );
         let temp = config.initialTemp;
@@ -2129,10 +2164,15 @@ function runSAAsync(
             if (config.maxIterations !== undefined && iter >= config.maxIterations) return true;
             return false;
         };
+        const finishWithBest = (): void => {
+            connections.length = 0;
+            connections.push(...bestConnections.map((conn) => ({ ...conn })));
+            resolve(best.map((machine) => ({ ...machine })));
+        };
 
         function step() {
             if (shouldStop()) {
-                resolve(bestLexic);
+                finishWithBest();
                 return;
             }
 
@@ -2145,9 +2185,13 @@ function runSAAsync(
                     iter++;
                     const chosenOperator = pickOperator();
                     const preMoveScore = currentScore;
+                    const operatorMutatesConnections = chosenOperator.id === 'try_different_port';
+                    const candidateConnections = operatorMutatesConnections
+                        ? currentConnections.map((conn) => ({ ...conn }))
+                        : currentConnections;
                     const candidate = perturbSmart(
                         current,
-                        connections,
+                        candidateConnections,
                         gridW,
                         gridH,
                         random,
@@ -2155,7 +2199,13 @@ function runSAAsync(
                         chosenOperator.id,
                         fixedMachineIds,
                     );
-                    const candidateScore = scorePlacement(candidate, connections, gridW, gridH, config.useFastScore);
+                    const candidateScore = scorePlacement(
+                        candidate,
+                        candidateConnections,
+                        gridW,
+                        gridH,
+                        config.useFastScore,
+                    );
                     const stats = operatorStats.get(chosenOperator.id)!;
                     stats.attempts++;
                     let gain = 0;
@@ -2165,12 +2215,15 @@ function runSAAsync(
                         const delta = candidateScore - currentScore;
                         if (delta < 0 || random() < Math.exp(-delta / temp)) {
                             current = candidate;
+                            if (operatorMutatesConnections) {
+                                currentConnections = candidateConnections;
+                            }
                             currentScore = candidateScore;
                             gain = Math.max(0, preMoveScore - candidateScore);
                             stats.accepted++;
                             const candidateFastBreakdown = computeFastScoreBreakdown(
                                 candidate,
-                                connections,
+                                candidateConnections,
                                 new Map(candidate.map((machine) => [machine.id, machine])),
                             );
                             if (
@@ -2179,12 +2232,14 @@ function runSAAsync(
                             ) {
                                 bestLexicBreakdown = candidateFastBreakdown;
                                 bestLexic = candidate.map((m) => ({ ...m }));
+                                bestLexicConnections = candidateConnections.map((conn) => ({ ...conn }));
                                 improvedBest = true;
                             }
                             if (candidateScore < bestScore) {
                                 const bestImprovement = bestScore - candidateScore;
                                 bestScore = candidateScore;
                                 best = candidate.map((m) => ({ ...m }));
+                                bestConnections = candidateConnections.map((conn) => ({ ...conn }));
                                 stats.improved++;
                                 improvedBest = true;
                                 if (
@@ -2215,14 +2270,14 @@ function runSAAsync(
             }
 
             if (onProgress) {
-                const breakdown = buildAndScore(bestLexic, connections, gridW, gridH);
+                const breakdown = buildAndScore(bestLexic, bestLexicConnections, gridW, gridH);
                 if (breakdown) {
                     onProgress(breakdown.score, iter);
                 } else {
                     // A* routing failed — report proxy score components.
                     const fastBreakdown = computeFastScoreBreakdown(
                         bestLexic,
-                        connections,
+                        bestLexicConnections,
                         new Map(bestLexic.map((m) => [m.id, m])),
                     );
                     if (fastBreakdown.totalScore < Infinity) {
@@ -2235,11 +2290,18 @@ function runSAAsync(
             if (stagnation > 5 && temp > config.minTemp) {
                 temp = Math.min(config.initialTemp * 0.5, temp * 3);
                 current = bestLexic.map((m) => ({ ...m }));
-                currentScore = scorePlacement(current, connections, gridW, gridH, config.useFastScore);
+                currentConnections = bestLexicConnections.map((conn) => ({ ...conn }));
+                currentScore = scorePlacement(
+                    current,
+                    currentConnections,
+                    gridW,
+                    gridH,
+                    config.useFastScore,
+                );
                 const escapeCandidate = tryStagnationEscapeKick(
                     bestLexic,
+                    bestLexicConnections,
                     bestScore,
-                    connections,
                     gridW,
                     gridH,
                     config.useFastScore,
@@ -2250,6 +2312,7 @@ function runSAAsync(
                 );
                 if (escapeCandidate) {
                     current = escapeCandidate.machines;
+                    currentConnections = escapeCandidate.connections;
                     currentScore = escapeCandidate.score;
                 }
                 stagnationEscapes++;
@@ -2259,7 +2322,7 @@ function runSAAsync(
             if (temp > config.minTemp && !shouldStop()) {
                 setTimeout(step, 0);
             } else {
-                resolve(bestLexic);
+                finishWithBest();
             }
         }
 
@@ -2269,8 +2332,8 @@ function runSAAsync(
 
 function tryStagnationEscapeKick(
     best: Machine[],
+    bestConnections: Connection[],
     _bestScore: number,
-    connections: Connection[],
     gridW: number,
     gridH: number,
     useFastScore: boolean,
@@ -2278,7 +2341,7 @@ function tryStagnationEscapeKick(
     operatorConfig: SAOperatorConfig,
     fixedMachineIds: Set<string>,
     escapeCount: number,
-): { machines: Machine[]; score: number } | null {
+): { machines: Machine[]; connections: Connection[]; score: number } | null {
     const forcedOperators: MoveOperatorId[] = [
         'critical_net_focus',
         'cluster_destroy_repair',
@@ -2286,16 +2349,17 @@ function tryStagnationEscapeKick(
         'joint_move_rotate',
     ];
     const escapeAttempts = 2 + Math.min(2, escapeCount % 2);
-    let picked: { machines: Machine[]; score: number } | null = null;
+    let picked: { machines: Machine[]; connections: Connection[]; score: number } | null = null;
 
     for (let attempt = 0; attempt < escapeAttempts; attempt++) {
         let candidate = best.map((machine) => ({ ...machine }));
+        const candidateConnections = bestConnections.map((conn) => ({ ...conn }));
         const kickCount = 3 + ((escapeCount + attempt) % 4);
         for (let i = 0; i < kickCount; i++) {
             const forcedOperator = forcedOperators[(i + escapeCount + attempt) % forcedOperators.length];
             candidate = perturbSmart(
                 candidate,
-                connections,
+                candidateConnections,
                 gridW,
                 gridH,
                 random,
@@ -2304,10 +2368,10 @@ function tryStagnationEscapeKick(
                 fixedMachineIds,
             );
         }
-        const candidateScore = scorePlacement(candidate, connections, gridW, gridH, useFastScore);
+        const candidateScore = scorePlacement(candidate, candidateConnections, gridW, gridH, useFastScore);
         if (!Number.isFinite(candidateScore)) continue;
         if (!picked || candidateScore < picked.score) {
-            picked = { machines: candidate, score: candidateScore };
+            picked = { machines: candidate, connections: candidateConnections, score: candidateScore };
         }
     }
 
@@ -2326,14 +2390,29 @@ function buildAdaptiveOperatorConfig(
     const normalizedTemp = Math.max(0, Math.min(1, (temp - minTemp) / span));
     const inEarlyPhase = normalizedTemp >= 0.45;
     let scheduledLargeRate = inEarlyPhase ? base.largeMoveRateEarly : base.largeMoveRateLate;
-    if (iterationsSinceBest > Math.max(30, Math.floor(base.adaptiveStagnationResetWindow * 0.6))) {
-        scheduledLargeRate = Math.max(scheduledLargeRate, base.largeMoveRateEarly);
+    const stagnationTrigger = Math.max(30, Math.floor(base.adaptiveStagnationResetWindow * 0.6));
+    if (iterationsSinceBest > stagnationTrigger) {
+        const stagnationBoost = Math.min(
+            0.22,
+            Math.max(base.largeMoveRateEarly, Math.max(base.largeMoveRate * 2.5, base.largeMoveRateEarly * 2)),
+        );
+        scheduledLargeRate = Math.max(scheduledLargeRate, stagnationBoost);
+    }
+    if (iterationsSinceBest > stagnationTrigger * 2) {
+        const severeStagnationBoost = Math.min(0.3, Math.max(base.largeMoveRateEarly * 2.6, base.largeMoveRate * 3));
+        scheduledLargeRate = Math.max(scheduledLargeRate, severeStagnationBoost);
     }
     if (largeMoveCooldownRemaining > 0) {
         scheduledLargeRate = 0;
     }
     const divisor = Math.max(1e-6, Math.max(base.largeMoveRate, base.criticalNetRate));
-    const criticalShare = Math.max(0, Math.min(1, base.criticalNetRate / divisor));
+    let criticalShare = Math.max(0, Math.min(1, base.criticalNetRate / divisor));
+    if (iterationsSinceBest > stagnationTrigger) {
+        criticalShare = Math.max(criticalShare, 0.45);
+    }
+    if (iterationsSinceBest > stagnationTrigger * 2) {
+        criticalShare = Math.max(criticalShare, 0.55);
+    }
     const criticalNetRate = scheduledLargeRate * criticalShare;
 
     return {
@@ -2512,6 +2591,7 @@ function computeFastScoreBreakdown(
     connections: Connection[],
     machineMap: Map<string, Machine>,
 ): ScoreBreakdown {
+    const portsCache = new Map<string, CachedMachinePorts>();
     let totalDist = 0;
     let cornerCount = 0;
     let minX = Infinity;
@@ -2540,8 +2620,8 @@ function computeFastScoreBreakdown(
         if (!src || !tgt) {
             return { totalBelts: Infinity, boundingBoxArea: Infinity, cornerCount: Infinity, totalScore: Infinity };
         }
-        const srcPorts = getMachinePorts(src);
-        const tgtPorts = getMachinePorts(tgt);
+        const srcPorts = getMachinePortsCached(src, portsCache);
+        const tgtPorts = getMachinePortsCached(tgt, portsCache);
         const srcPort = srcPorts.outputs[conn.sourcePortIndex];
         const tgtPort = tgtPorts.inputs[conn.targetPortIndex];
         if (!srcPort || !tgtPort) {
@@ -2672,8 +2752,10 @@ function perturbSmart(
         case 'swap_positions':
             if (movableIndexes.length > 1) {
                 const i = movableIndexes[Math.floor(random() * movableIndexes.length)];
-                const otherIndexes = movableIndexes.filter((idx) => idx !== i);
-                const j = otherIndexes[Math.floor(random() * otherIndexes.length)];
+                let j = movableIndexes[Math.floor(random() * movableIndexes.length)];
+                while (j === i) {
+                    j = movableIndexes[Math.floor(random() * movableIndexes.length)];
+                }
                 const tmpX = result[i].x;
                 const tmpY = result[i].y;
                 result[i].x = result[j].x;
@@ -2685,6 +2767,7 @@ function perturbSmart(
         case 'rotate_best': {
             const idx = movableIndexes[Math.floor(random() * movableIndexes.length)];
             const machineMap = new Map(result.map((m) => [m.id, m]));
+            const portsCache = new Map<string, CachedMachinePorts>();
             let bestOrient = result[idx].orientation;
             let bestDist = Infinity;
             for (const orient of ORIENTATIONS) {
@@ -2697,8 +2780,8 @@ function perturbSmart(
                     const src = machineMap.get(conn.sourceMachineId);
                     const tgt = machineMap.get(conn.targetMachineId);
                     if (!src || !tgt) continue;
-                    const sp = getMachinePorts(src).outputs[conn.sourcePortIndex];
-                    const tp = getMachinePorts(tgt).inputs[conn.targetPortIndex];
+                    const sp = getMachinePortsCached(src, portsCache).outputs[conn.sourcePortIndex];
+                    const tp = getMachinePortsCached(tgt, portsCache).inputs[conn.targetPortIndex];
                     if (sp && tp) totalDist += estimateBeltLength(sp, tp);
                 }
                 if (totalDist < bestDist) {
@@ -2907,10 +2990,11 @@ function applyCriticalNetFocusedMove(
 ): boolean {
     if (machines.length < 2 || connections.length === 0) return false;
     const machineMap = new Map(machines.map((machine) => [machine.id, machine]));
+    const portsCache = new Map<string, CachedMachinePorts>();
     const scoredConnections = connections
         .map((connection) => ({
             connection,
-            pain: estimateConnectionPain(connection, machineMap),
+            pain: estimateConnectionPain(connection, machineMap, portsCache),
         }))
         .filter((entry) => Number.isFinite(entry.pain) && entry.pain > 0)
         .sort((a, b) => b.pain - a.pain);
@@ -2941,7 +3025,7 @@ function applyCriticalNetFocusedMove(
         2,
         Math.min(
             Math.max(2, clusterMinSize),
-            Math.min(clusterMaxSize, 4),
+            clusterMaxSize,
         ),
     );
     const rankedMachineIds = Array.from(machinePain.entries())
@@ -2974,6 +3058,7 @@ function applyCriticalNetFocusedMove(
     ]
         .filter((id) => !fixedMachineIds.has(id))
         .sort((a, b) => (machinePain.get(b) ?? 0) - (machinePain.get(a) ?? 0));
+    let movedAny = false;
     for (const machineId of fallbackOrder) {
         const machine = machineMap.get(machineId);
         if (!machine) continue;
@@ -2997,22 +3082,23 @@ function applyCriticalNetFocusedMove(
             || candidate.y !== before.y
             || candidate.orientation !== before.orientation
         ) {
-            return true;
+            movedAny = true;
         }
     }
 
-    return false;
+    return movedAny;
 }
 
 function estimateConnectionPain(
     connection: Connection,
     machineMap: Map<string, Machine>,
+    portsCache: Map<string, CachedMachinePorts> = new Map(),
 ): number {
     const src = machineMap.get(connection.sourceMachineId);
     const tgt = machineMap.get(connection.targetMachineId);
     if (!src || !tgt) return Infinity;
-    const srcPort = getMachinePorts(src).outputs[connection.sourcePortIndex];
-    const tgtPort = getMachinePorts(tgt).inputs[connection.targetPortIndex];
+    const srcPort = getMachinePortsCached(src, portsCache).outputs[connection.sourcePortIndex];
+    const tgtPort = getMachinePortsCached(tgt, portsCache).inputs[connection.targetPortIndex];
     if (!srcPort || !tgtPort) return Infinity;
     const dx = Math.abs(srcPort.x - tgtPort.x);
     const dy = Math.abs(srcPort.y - tgtPort.y);
@@ -3160,10 +3246,31 @@ function findDestroyRepairPlacement(
     }
 
     const anchor = getRepairAnchor(connectedPlacedNeighbors, machineMap, original);
-    for (let attempt = 0; attempt < 24; attempt++) {
+    const exploratoryRadius = Math.max(6, Math.min(12, Math.floor(Math.max(gridW, gridH) * 0.22)));
+    const deterministicOffsets = [
+        { dx: 0, dy: 0 },
+        { dx: exploratoryRadius, dy: 0 },
+        { dx: -exploratoryRadius, dy: 0 },
+        { dx: 0, dy: exploratoryRadius },
+        { dx: 0, dy: -exploratoryRadius },
+        { dx: Math.floor(exploratoryRadius * 0.7), dy: Math.floor(exploratoryRadius * 0.7) },
+        { dx: Math.floor(exploratoryRadius * 0.7), dy: -Math.floor(exploratoryRadius * 0.7) },
+        { dx: -Math.floor(exploratoryRadius * 0.7), dy: Math.floor(exploratoryRadius * 0.7) },
+        { dx: -Math.floor(exploratoryRadius * 0.7), dy: -Math.floor(exploratoryRadius * 0.7) },
+    ];
+    for (const offset of deterministicOffsets) {
+        for (const orient of ORIENTATIONS) {
+            tryPlacement(
+                Math.round(anchor.x + offset.dx),
+                Math.round(anchor.y + offset.dy),
+                orient,
+            );
+        }
+    }
+    for (let attempt = 0; attempt < 36; attempt++) {
         const orient = ORIENTATIONS[Math.floor(random() * ORIENTATIONS.length)];
-        const x = Math.round(anchor.x + (random() * 10 - 5));
-        const y = Math.round(anchor.y + (random() * 10 - 5));
+        const x = Math.round(anchor.x + (random() * exploratoryRadius * 2 - exploratoryRadius));
+        const y = Math.round(anchor.y + (random() * exploratoryRadius * 2 - exploratoryRadius));
         tryPlacement(x, y, orient);
     }
     tryPlacement(original.x, original.y, original.orientation);
@@ -3201,14 +3308,15 @@ function estimateMachineConnectionCost(
     connections: Connection[],
 ): number {
     const machineMap = new Map(machines.map((m) => [m.id, m]));
+    const portsCache = new Map<string, CachedMachinePorts>();
     let totalDist = 0;
     for (const conn of connections) {
         if (conn.sourceMachineId !== machineId && conn.targetMachineId !== machineId) continue;
         const src = machineMap.get(conn.sourceMachineId);
         const tgt = machineMap.get(conn.targetMachineId);
         if (!src || !tgt) continue;
-        const srcPort = getMachinePorts(src).outputs[conn.sourcePortIndex];
-        const tgtPort = getMachinePorts(tgt).inputs[conn.targetPortIndex];
+        const srcPort = getMachinePortsCached(src, portsCache).outputs[conn.sourcePortIndex];
+        const tgtPort = getMachinePortsCached(tgt, portsCache).inputs[conn.targetPortIndex];
         if (!srcPort || !tgtPort) return Infinity;
         totalDist += estimateBeltLength(srcPort, tgtPort);
     }
@@ -3250,7 +3358,8 @@ function moveTowardNeighbor(
     }
 
     if (!bestNeighborId) return;
-    const neighbor = machines.find((m) => m.id === bestNeighborId);
+    const machineMap = new Map(machines.map((m) => [m.id, m]));
+    const neighbor = machineMap.get(bestNeighborId);
     if (!neighbor) return;
 
     const dx = Math.sign(neighbor.x - machine.x);
@@ -3272,9 +3381,13 @@ function moveToSource(
     fixedMachineIds: Set<string>,
 ): void {
     const machineMap = new Map(machines.map((m) => [m.id, m]));
+    const hasIncoming = new Set<string>();
+    for (const conn of connections) {
+        hasIncoming.add(conn.targetMachineId);
+    }
     const candidates = machines.filter((m) => {
         if (fixedMachineIds.has(m.id)) return false;
-        return connections.some((conn) => conn.targetMachineId === m.id);
+        return hasIncoming.has(m.id);
     });
     if (candidates.length === 0) return;
 
@@ -3318,6 +3431,7 @@ function tryDifferentPortAssignment(
     fixedMachineIds: Set<string>,
 ): void {
     const machineMap = new Map(machines.map((m) => [m.id, m]));
+    const portsCache = new Map<string, CachedMachinePorts>();
     const eligibleConnections = connections.filter((conn) => (
         !fixedMachineIds.has(conn.sourceMachineId) || !fixedMachineIds.has(conn.targetMachineId)
     ));
@@ -3339,8 +3453,8 @@ function tryDifferentPortAssignment(
         if (other.targetMachineId === tgt.id) usedInputPorts.add(other.targetPortIndex);
     }
 
-    const srcPorts = getMachinePorts(src).outputs;
-    const tgtPorts = getMachinePorts(tgt).inputs;
+    const srcPorts = getMachinePortsCached(src, portsCache).outputs;
+    const tgtPorts = getMachinePortsCached(tgt, portsCache).inputs;
     let bestSrcIdx = conn.sourcePortIndex;
     let bestTgtIdx = conn.targetPortIndex;
     let bestDist = Infinity;
@@ -3386,6 +3500,7 @@ function portFacingJump(
     if (movableIndexes.length === 0) return;
     const idx = movableIndexes[Math.floor(random() * movableIndexes.length)];
     const machine = machines[idx];
+    const machineMap = new Map(machines.map((m) => [m.id, m]));
 
     // Find most-connected neighbor
     const neighborCounts = new Map<string, number>();
@@ -3410,12 +3525,12 @@ function portFacingJump(
     }
     if (!bestNeighborId) return;
 
-    const neighbor = machines.find((m) => m.id === bestNeighborId);
+    const neighbor = machineMap.get(bestNeighborId);
     if (!neighbor) return;
 
     const nDims = getOrientedDimensions(neighbor);
-    const machineMap = new Map(machines.map((m) => [m.id, m]));
     const placed = new Set(machines.filter((m) => m.id !== machine.id).map((m) => m.id));
+    const portsCache = new Map<string, CachedMachinePorts>();
 
     let bestCost = Infinity;
     let bestX = machine.x;
@@ -3449,8 +3564,8 @@ function portFacingJump(
                 const src = machineMap.get(conn.sourceMachineId);
                 const tgt = machineMap.get(conn.targetMachineId);
                 if (!src || !tgt) continue;
-                const sp = getMachinePorts(src).outputs[conn.sourcePortIndex];
-                const tp = getMachinePorts(tgt).inputs[conn.targetPortIndex];
+                const sp = getMachinePortsCached(src, portsCache).outputs[conn.sourcePortIndex];
+                const tp = getMachinePortsCached(tgt, portsCache).inputs[conn.targetPortIndex];
                 if (sp && tp) totalDist += estimateBeltLength(sp, tp);
             }
 
@@ -3484,6 +3599,7 @@ function optimizePortAssignments(
 ): Machine[] {
     const result = machines.map((m) => ({ ...m }));
     const machineMap = new Map(result.map((m) => [m.id, m]));
+    const portsCache = new Map<string, CachedMachinePorts>();
     const originalConns = connections.map((c) => ({ ...c }));
     const optimizedConns = connections.map((c) => ({ ...c }));
 
@@ -3495,8 +3611,8 @@ function optimizePortAssignments(
         const src = machineMap.get(conn.sourceMachineId);
         const tgt = machineMap.get(conn.targetMachineId);
         if (!src || !tgt) return { conn, est: Infinity };
-        const srcPorts = getMachinePorts(src);
-        const tgtPorts = getMachinePorts(tgt);
+        const srcPorts = getMachinePortsCached(src, portsCache);
+        const tgtPorts = getMachinePortsCached(tgt, portsCache);
         const srcPort = srcPorts.outputs[conn.sourcePortIndex];
         const tgtPort = tgtPorts.inputs[conn.targetPortIndex];
         const est = srcPort && tgtPort ? estimateBeltLength(srcPort, tgtPort) : Infinity;
@@ -3508,8 +3624,8 @@ function optimizePortAssignments(
         const src = machineMap.get(conn.sourceMachineId);
         const tgt = machineMap.get(conn.targetMachineId);
         if (!src || !tgt) continue;
-        const srcPorts = getMachinePorts(src);
-        const tgtPorts = getMachinePorts(tgt);
+        const srcPorts = getMachinePortsCached(src, portsCache);
+        const tgtPorts = getMachinePortsCached(tgt, portsCache);
         const srcPortCount = getOutputPortCount(src);
         const tgtPortCount = getInputPortCount(tgt);
         if (srcPortCount <= 0 || tgtPortCount <= 0) continue;
@@ -3663,39 +3779,77 @@ function compactLayout(
 // GRID BUILDER
 // ─────────────────────────────────────────────────────────
 
+function prioritizeConnectionsForRouting(
+    machineMap: Map<string, Machine>,
+    connections: Connection[],
+): Connection[] {
+    if (connections.length <= 1) return connections.slice();
+    const degree = new Map<string, number>();
+    for (const connection of connections) {
+        degree.set(connection.sourceMachineId, (degree.get(connection.sourceMachineId) ?? 0) + 1);
+        degree.set(connection.targetMachineId, (degree.get(connection.targetMachineId) ?? 0) + 1);
+    }
+    const portsCache = new Map<string, CachedMachinePorts>();
+    const scoreConnection = (connection: Connection): number => {
+        const src = machineMap.get(connection.sourceMachineId);
+        const tgt = machineMap.get(connection.targetMachineId);
+        if (!src || !tgt) return Number.POSITIVE_INFINITY;
+        const srcPort = getMachinePortsCached(src, portsCache).outputs[connection.sourcePortIndex];
+        const tgtPort = getMachinePortsCached(tgt, portsCache).inputs[connection.targetPortIndex];
+        if (!srcPort || !tgtPort) return Number.POSITIVE_INFINITY;
+        const srcTile = getPortExternalTile(srcPort);
+        const tgtTile = getPortExternalTile(tgtPort);
+        const dx = Math.abs(srcTile.x - tgtTile.x);
+        const dy = Math.abs(srcTile.y - tgtTile.y);
+        const turnBias = dx > 0 && dy > 0 ? 4 : 0;
+        const pressureBias = ((degree.get(connection.sourceMachineId) ?? 0) + (degree.get(connection.targetMachineId) ?? 0)) * 1.75;
+        return dx + dy + turnBias + pressureBias;
+    };
+
+    const scored = connections.map((connection) => ({
+        connection,
+        score: scoreConnection(connection),
+    }));
+    scored.sort((a, b) => b.score - a.score);
+    return scored.map((item) => item.connection);
+}
+
 function buildGrid(
     machines: Machine[],
     connections: Connection[],
     gridW: number,
     gridH: number,
 ): GridState | null {
-    const grid = createGrid(gridW, gridH);
+    const machineMap = new Map(machines.map((machine) => [machine.id, machine]));
+    const tryBuildWithOrder = (routingOrder: Connection[]): GridState | null => {
+        const grid = createGrid(gridW, gridH);
+        for (const machine of machines) {
+            if (!placeMachine(grid, machine)) return null;
+        }
+        for (const connection of connections) {
+            grid.connections.set(connection.id, connection);
+        }
 
-    for (const m of machines) {
-        if (!placeMachine(grid, m)) return null;
-    }
+        const portsCache = new Map<string, CachedMachinePorts>();
+        for (const connection of routingOrder) {
+            const src = machineMap.get(connection.sourceMachineId);
+            const tgt = machineMap.get(connection.targetMachineId);
+            if (!src || !tgt) return null;
+            const srcPort = getMachinePortsCached(src, portsCache).outputs[connection.sourcePortIndex];
+            const tgtPort = getMachinePortsCached(tgt, portsCache).inputs[connection.targetPortIndex];
+            if (!srcPort || !tgtPort) return null;
+            const path = findBeltPath(grid, srcPort, tgtPort, connection.id);
+            if (!path) return null;
+            applyBeltPath(grid, path);
+        }
 
-    for (const conn of connections) {
-        grid.connections.set(conn.id, conn);
-    }
+        return grid;
+    };
 
-    for (const conn of connections) {
-        const src = grid.machines.get(conn.sourceMachineId);
-        const tgt = grid.machines.get(conn.targetMachineId);
-        if (!src || !tgt) return null;
-
-        const srcPorts = getMachinePorts(src);
-        const tgtPorts = getMachinePorts(tgt);
-        const srcPort = srcPorts.outputs[conn.sourcePortIndex];
-        const tgtPort = tgtPorts.inputs[conn.targetPortIndex];
-        if (!srcPort || !tgtPort) return null;
-
-        const path = findBeltPath(grid, srcPort, tgtPort, conn.id);
-        if (!path) return null;
-        applyBeltPath(grid, path);
-    }
-
-    return grid;
+    const prioritizedOrder = prioritizeConnectionsForRouting(machineMap, connections);
+    const prioritized = tryBuildWithOrder(prioritizedOrder);
+    if (prioritized) return prioritized;
+    return tryBuildWithOrder(connections);
 }
 
 function buildAndScore(
