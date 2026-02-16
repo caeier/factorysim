@@ -30,10 +30,13 @@ const ORIENTATIONS = [Orientation.NORTH, Orientation.EAST, Orientation.SOUTH, Or
 
 export function createAdversarialScenarios(): BenchmarkScenario[] {
     return [
-        buildDenseCrossbarScenario(),
-        buildChokepointCorridorScenario(),
-        buildMixedSizeCongestionScenario(),
-        buildCyclicChordConflictScenario(),
+        buildTightPackingPinwheelScenario(),
+        buildLongHaulRelayScenario(),
+        buildPortPressureHubScenario(),
+        buildAnchorInjectionScenario(),
+        buildDualCorridorCongestionScenario(),
+        buildMixedFootprintWeaveScenario(),
+        buildCyclicBackflowScenario(),
     ];
 }
 
@@ -140,160 +143,254 @@ export function createSeededRandom(seed: number): RandomFn {
     };
 }
 
-function buildDenseCrossbarScenario(): BenchmarkScenario {
-    const sources = Array.from(
-        { length: 3 },
-        (_, i) => makeMachine(`crossbar_s${i}`, MachineType.M6x4, 4 + i * 16, 4, Orientation.SOUTH),
-    );
-    const sinks = Array.from(
-        { length: 3 },
-        (_, i) => makeMachine(`crossbar_t${i}`, MachineType.M6x4, 4 + i * 16, 38, Orientation.NORTH),
-    );
-    const machines = [...sources, ...sinks];
-    const connections: Connection[] = [];
-    let id = 0;
-    for (let s = 0; s < sources.length; s++) {
-        for (let t = 0; t < sinks.length; t++) {
-            const sourceCount = outputPortCountForType(sources[s].type);
-            const targetCount = inputPortCountForType(sinks[t].type);
-            connections.push({
-                id: `crossbar_c${id++}`,
-                sourceMachineId: sources[s].id,
-                sourcePortIndex: (s + t * 2) % sourceCount,
-                targetMachineId: sinks[t].id,
-                targetPortIndex: (t + s * 2) % targetCount,
-            });
-        }
-    }
-
-    return {
-        name: 'dense crossbar',
-        gridSize: GRID_SIZE,
-        machines,
-        connections,
-    };
-}
-
-function buildChokepointCorridorScenario(): BenchmarkScenario {
-    const left = Array.from({ length: 4 }, (_, i) => makeMachine(`corr_l${i}`, MachineType.M3x3, 3, 6 + i * 9, Orientation.EAST));
-    const right = Array.from({ length: 4 }, (_, i) => makeMachine(`corr_r${i}`, MachineType.M3x3, 43, 6 + i * 9, Orientation.WEST));
-    const blockers: Machine[] = [
-        makeMachine('corr_b0', MachineType.M5x5, 20, 0, Orientation.NORTH),
-        makeMachine('corr_b1', MachineType.M5x5, 20, 8, Orientation.NORTH),
-        makeMachine('corr_b2', MachineType.M5x5, 20, 16, Orientation.NORTH),
-        makeMachine('corr_b3', MachineType.M5x5, 20, 31, Orientation.NORTH),
-        makeMachine('corr_b4', MachineType.M5x5, 27, 0, Orientation.NORTH),
-        makeMachine('corr_b5', MachineType.M5x5, 27, 8, Orientation.NORTH),
-        makeMachine('corr_b6', MachineType.M5x5, 27, 16, Orientation.NORTH),
-        makeMachine('corr_b7', MachineType.M5x5, 27, 31, Orientation.NORTH),
-    ];
-    const machines = [...left, ...right, ...blockers];
-    const connections: Connection[] = [];
-    let id = 0;
-    for (let i = 0; i < left.length; i++) {
-        connections.push({
-            id: `corr_c${id++}`,
-            sourceMachineId: left[i].id,
-            sourcePortIndex: i % 3,
-            targetMachineId: right[(i + 1) % right.length].id,
-            targetPortIndex: (i + 2) % 3,
-        });
-        connections.push({
-            id: `corr_c${id++}`,
-            sourceMachineId: left[i].id,
-            sourcePortIndex: (i + 1) % 3,
-            targetMachineId: right[i].id,
-            targetPortIndex: i % 3,
-        });
-    }
-
-    return {
-        name: 'chokepoint corridor',
-        gridSize: GRID_SIZE,
-        machines,
-        connections,
-    };
-}
-
-function buildMixedSizeCongestionScenario(): BenchmarkScenario {
+function buildTightPackingPinwheelScenario(): BenchmarkScenario {
     const machines: Machine[] = [
-        makeMachine('mix_a', MachineType.M5x5, 6, 6, Orientation.SOUTH),
-        makeMachine('mix_b', MachineType.M6x4, 16, 7, Orientation.EAST),
-        makeMachine('mix_c', MachineType.M3x3, 25, 8, Orientation.WEST),
-        makeMachine('mix_d', MachineType.M5x5, 33, 6, Orientation.NORTH),
-        makeMachine('mix_e', MachineType.M3x3, 9, 20, Orientation.EAST),
-        makeMachine('mix_f', MachineType.M6x4, 19, 20, Orientation.SOUTH),
-        makeMachine('mix_g', MachineType.M5x5, 30, 20, Orientation.WEST),
-        makeMachine('mix_h', MachineType.M3x3, 12, 33, Orientation.NORTH),
-        makeMachine('mix_i', MachineType.M6x4, 23, 34, Orientation.WEST),
-        makeMachine('mix_j', MachineType.M3x3, 36, 34, Orientation.SOUTH),
+        makeMachine('pin_core_a', MachineType.M5x5, 14, 14, Orientation.NORTH),
+        makeMachine('pin_core_b', MachineType.M6x4, 22, 13, Orientation.WEST),
+        makeMachine('pin_core_c', MachineType.M5x5, 28, 14, Orientation.SOUTH),
+        makeMachine('pin_nw', MachineType.M3x3, 9, 8, Orientation.NORTH),
+        makeMachine('pin_ne', MachineType.M3x3, 34, 8, Orientation.NORTH),
+        makeMachine('pin_w', MachineType.M3x3, 8, 23, Orientation.WEST),
+        makeMachine('pin_e', MachineType.M3x3, 36, 23, Orientation.EAST),
+        makeMachine('pin_sw', MachineType.M3x3, 12, 33, Orientation.SOUTH),
+        makeMachine('pin_se', MachineType.M3x3, 31, 33, Orientation.SOUTH),
     ];
 
     const pairs: Array<[number, number]> = [
-        [0, 1], [0, 4], [1, 2], [1, 5], [2, 3], [2, 6], [3, 6],
-        [4, 5], [4, 7], [5, 6], [5, 8], [6, 9], [7, 8], [8, 9],
-        [7, 5], [8, 6], [9, 3], [6, 2],
+        [3, 0], [4, 2], [5, 0], [6, 2],
+        [0, 1], [2, 1], [1, 7], [1, 8],
+        [0, 2], [2, 0], [3, 1], [4, 1], [5, 1], [6, 1],
     ];
-    const connections = pairs.map(([srcIdx, tgtIdx], idx) => ({
-        id: `mix_c${idx}`,
-        sourceMachineId: machines[srcIdx].id,
-        sourcePortIndex: idx % outputPortCountForType(machines[srcIdx].type),
-        targetMachineId: machines[tgtIdx].id,
-        targetPortIndex: (idx + 1) % inputPortCountForType(machines[tgtIdx].type),
-    }));
 
     return {
-        name: 'mixed-size congestion',
+        name: 'tight packing pinwheel',
         gridSize: GRID_SIZE,
         machines,
-        connections,
+        connections: createConnectionsFromPairs('pin', machines, pairs),
     };
 }
 
-function buildCyclicChordConflictScenario(): BenchmarkScenario {
-    const machines = Array.from({ length: 10 }, (_, i) => {
-        const ringPos = [
-            { x: 2, y: 2 }, { x: 14, y: 3 }, { x: 26, y: 2 }, { x: 38, y: 3 }, { x: 42, y: 15 },
-            { x: 36, y: 30 }, { x: 24, y: 38 }, { x: 12, y: 35 }, { x: 3, y: 24 }, { x: 6, y: 12 },
-        ][i];
-        return makeMachine(
-            `cycle_m${i}`,
-            MachineType.M3x3,
-            ringPos.x,
-            ringPos.y,
-            ORIENTATIONS[i % ORIENTATIONS.length],
-        );
-    });
+function buildLongHaulRelayScenario(): BenchmarkScenario {
+    const machines: Machine[] = [
+        makeMachine('haul_s0', MachineType.M3x3, 2, 5, Orientation.WEST),
+        makeMachine('haul_s1', MachineType.M5x5, 2, 19, Orientation.WEST),
+        makeMachine('haul_s2', MachineType.M6x4, 2, 35, Orientation.WEST),
+        makeMachine('haul_t0', MachineType.M3x3, 43, 6, Orientation.WEST),
+        makeMachine('haul_t1', MachineType.M5x5, 41, 20, Orientation.WEST),
+        makeMachine('haul_t2', MachineType.M6x4, 42, 34, Orientation.WEST),
+        makeMachine('haul_r0', MachineType.M3x3, 21, 10, Orientation.NORTH),
+        makeMachine('haul_r1', MachineType.M5x5, 22, 22, Orientation.WEST),
+        makeMachine('haul_r2', MachineType.M3x3, 21, 37, Orientation.SOUTH),
+    ];
 
-    const connections: Connection[] = [];
-    let id = 0;
-    for (let i = 0; i < machines.length; i++) {
-        const next = (i + 1) % machines.length;
-        connections.push({
-            id: `cycle_c${id++}`,
-            sourceMachineId: machines[i].id,
-            sourcePortIndex: i % 3,
-            targetMachineId: machines[next].id,
-            targetPortIndex: (i + 2) % 3,
-        });
-    }
-    const chords: Array<[number, number]> = [[0, 5], [1, 6], [2, 7], [3, 8], [4, 9]];
-    for (const [src, tgt] of chords) {
-        connections.push({
-            id: `cycle_c${id++}`,
-            sourceMachineId: machines[src].id,
-            sourcePortIndex: (src + 1) % 3,
-            targetMachineId: machines[tgt].id,
-            targetPortIndex: (tgt + 2) % 3,
-        });
-    }
+    const pairs: Array<[number, number]> = [
+        [0, 6], [0, 7], [1, 6], [1, 7], [1, 8], [2, 7], [2, 8],
+        [6, 3], [6, 4], [7, 3], [7, 4], [7, 5], [8, 4], [8, 5],
+        [0, 3], [2, 5],
+    ];
 
     return {
-        name: 'cyclic + long chords with port conflicts',
+        name: 'long-haul relay bus',
         gridSize: GRID_SIZE,
         machines,
-        connections,
+        connections: createConnectionsFromPairs('haul', machines, pairs),
     };
+}
+
+function buildPortPressureHubScenario(): BenchmarkScenario {
+    const machines: Machine[] = [
+        makeMachine('hub_in', MachineType.M6x4, 20, 18, Orientation.WEST),
+        makeMachine('hub_out', MachineType.M6x4, 27, 18, Orientation.WEST),
+        makeMachine('hub_src_nw', MachineType.M3x3, 14, 8, Orientation.NORTH),
+        makeMachine('hub_src_n', MachineType.M3x3, 23, 8, Orientation.NORTH),
+        makeMachine('hub_src_ne', MachineType.M3x3, 32, 8, Orientation.NORTH),
+        makeMachine('hub_src_w', MachineType.M5x5, 10, 20, Orientation.WEST),
+        makeMachine('hub_src_sw', MachineType.M3x3, 14, 34, Orientation.SOUTH),
+        makeMachine('hub_sink_e', MachineType.M5x5, 36, 20, Orientation.WEST),
+        makeMachine('hub_sink_se', MachineType.M3x3, 33, 35, Orientation.NORTH),
+        makeMachine('hub_sink_nw', MachineType.M3x3, 20, 2, Orientation.SOUTH),
+        makeMachine('hub_sink_far', MachineType.M3x3, 43, 9, Orientation.WEST),
+    ];
+
+    const pairs: Array<[number, number]> = [
+        [2, 0], [3, 0], [4, 0], [5, 0], [6, 0],
+        [0, 1], [0, 1], [0, 7],
+        [1, 7], [1, 8], [1, 9], [1, 10], [1, 4], [1, 5],
+    ];
+
+    return {
+        name: 'port-pressure twin hubs',
+        gridSize: GRID_SIZE,
+        machines,
+        connections: createConnectionsFromPairs('hub', machines, pairs),
+    };
+}
+
+function buildAnchorInjectionScenario(): BenchmarkScenario {
+    const machines: Machine[] = [
+        makeMachine('anc_l0', MachineType.M3x1, 5, 7, Orientation.EAST),
+        makeMachine('anc_l1', MachineType.M3x1, 5, 20, Orientation.EAST),
+        makeMachine('anc_l2', MachineType.M3x1, 5, 33, Orientation.EAST),
+        makeMachine('anc_r0', MachineType.M3x1, 44, 10, Orientation.WEST),
+        makeMachine('anc_r1', MachineType.M3x1, 44, 23, Orientation.WEST),
+        makeMachine('anc_r2', MachineType.M3x1, 44, 36, Orientation.WEST),
+        makeMachine('anc_p0', MachineType.M5x5, 14, 11, Orientation.WEST),
+        makeMachine('anc_p1', MachineType.M6x4, 22, 10, Orientation.WEST),
+        makeMachine('anc_p2', MachineType.M5x5, 14, 27, Orientation.WEST),
+        makeMachine('anc_p3', MachineType.M6x4, 23, 29, Orientation.WEST),
+        makeMachine('anc_sink', MachineType.M5x5, 31, 19, Orientation.WEST),
+    ];
+
+    const pairs: Array<[number, number]> = [
+        [0, 6], [1, 6], [2, 8], [3, 7], [4, 9], [5, 9],
+        [6, 7], [6, 8], [6, 9],
+        [7, 10], [7, 8],
+        [8, 9], [8, 10],
+        [9, 10],
+    ];
+
+    return {
+        name: 'anchor injection lanes',
+        gridSize: GRID_SIZE,
+        machines,
+        connections: createConnectionsFromPairs('anc', machines, pairs),
+    };
+}
+
+function buildDualCorridorCongestionScenario(): BenchmarkScenario {
+    const left = Array.from(
+        { length: 4 },
+        (_, i) => makeMachine(`corr_l${i}`, MachineType.M3x3, 2, 5 + i * 10, Orientation.WEST),
+    );
+    const right = Array.from(
+        { length: 4 },
+        (_, i) => makeMachine(`corr_r${i}`, MachineType.M3x3, 45, 5 + i * 10, Orientation.WEST),
+    );
+    const blockers: Machine[] = [
+        makeMachine('corr_b0', MachineType.M5x5, 18, 0, Orientation.NORTH),
+        makeMachine('corr_b1', MachineType.M5x5, 18, 7, Orientation.NORTH),
+        makeMachine('corr_b2', MachineType.M5x5, 18, 14, Orientation.NORTH),
+        makeMachine('corr_b3', MachineType.M5x5, 18, 29, Orientation.NORTH),
+        makeMachine('corr_b4', MachineType.M5x5, 18, 36, Orientation.NORTH),
+        makeMachine('corr_b5', MachineType.M5x5, 27, 0, Orientation.NORTH),
+        makeMachine('corr_b6', MachineType.M5x5, 27, 7, Orientation.NORTH),
+        makeMachine('corr_b7', MachineType.M5x5, 27, 14, Orientation.NORTH),
+        makeMachine('corr_b8', MachineType.M5x5, 27, 29, Orientation.NORTH),
+        makeMachine('corr_b9', MachineType.M5x5, 27, 36, Orientation.NORTH),
+    ];
+    const machines = [...left, ...right, ...blockers];
+
+    const pairs: Array<[number, number]> = [
+        [0, 4], [0, 5], [0, 7],
+        [1, 4], [1, 6],
+        [2, 5], [2, 7],
+        [3, 6], [3, 7], [3, 4],
+    ];
+
+    return {
+        name: 'dual corridor congestion',
+        gridSize: GRID_SIZE,
+        machines,
+        connections: createConnectionsFromPairs('corr', machines, pairs),
+    };
+}
+
+function buildMixedFootprintWeaveScenario(): BenchmarkScenario {
+    const machines: Machine[] = [
+        makeMachine('weave_a', MachineType.M6x4, 6, 6, Orientation.WEST),
+        makeMachine('weave_b', MachineType.M5x5, 16, 5, Orientation.SOUTH),
+        makeMachine('weave_c', MachineType.M3x3, 29, 6, Orientation.NORTH),
+        makeMachine('weave_d', MachineType.M5x5, 37, 8, Orientation.WEST),
+        makeMachine('weave_e', MachineType.M3x3, 8, 23, Orientation.WEST),
+        makeMachine('weave_f', MachineType.M6x4, 18, 22, Orientation.SOUTH),
+        makeMachine('weave_g', MachineType.M5x5, 31, 23, Orientation.NORTH),
+        makeMachine('weave_h', MachineType.M3x3, 42, 24, Orientation.EAST),
+        makeMachine('weave_i', MachineType.M3x3, 14, 38, Orientation.NORTH),
+        makeMachine('weave_j', MachineType.M6x4, 27, 37, Orientation.EAST),
+        makeMachine('weave_k', MachineType.M5x5, 38, 37, Orientation.SOUTH),
+    ];
+
+    const pairs: Array<[number, number]> = [
+        [0, 1], [0, 4], [0, 5],
+        [1, 2], [1, 5], [1, 6],
+        [2, 3], [2, 6], [2, 5],
+        [3, 7],
+        [4, 5], [4, 8],
+        [5, 6], [5, 9], [5, 10],
+        [6, 7], [6, 10],
+        [8, 9], [9, 10],
+    ];
+
+    return {
+        name: 'mixed-footprint weave',
+        gridSize: GRID_SIZE,
+        machines,
+        connections: createConnectionsFromPairs('weave', machines, pairs),
+    };
+}
+
+function buildCyclicBackflowScenario(): BenchmarkScenario {
+    const machineSpecs: Array<{ id: string; type: MachineType; x: number; y: number }> = [
+        { id: 'cycle_0', type: MachineType.M3x3, x: 4, y: 4 },
+        { id: 'cycle_1', type: MachineType.M3x3, x: 16, y: 3 },
+        { id: 'cycle_2', type: MachineType.M5x5, x: 30, y: 4 },
+        { id: 'cycle_3', type: MachineType.M3x3, x: 42, y: 12 },
+        { id: 'cycle_4', type: MachineType.M6x4, x: 40, y: 28 },
+        { id: 'cycle_5', type: MachineType.M3x3, x: 27, y: 39 },
+        { id: 'cycle_6', type: MachineType.M5x5, x: 13, y: 37 },
+        { id: 'cycle_7', type: MachineType.M3x3, x: 3, y: 24 },
+    ];
+    const machines = machineSpecs.map((spec, index) =>
+        makeMachine(spec.id, spec.type, spec.x, spec.y, ORIENTATIONS[index % ORIENTATIONS.length]),
+    );
+
+    const pairs: Array<[number, number]> = [
+        [0, 1], [1, 2], [2, 3], [3, 4],
+        [4, 5], [5, 6], [6, 7], [7, 0],
+        [0, 4], [1, 5], [2, 6], [3, 7],
+        [5, 1], [6, 2], [7, 3],
+    ];
+
+    return {
+        name: 'cyclic backflow ring',
+        gridSize: GRID_SIZE,
+        machines,
+        connections: createConnectionsFromPairs('cycle', machines, pairs),
+    };
+}
+
+function createConnectionsFromPairs(
+    prefix: string,
+    machines: Machine[],
+    pairs: Array<[number, number]>,
+): Connection[] {
+    const outUsage = new Map<number, number>();
+    const inUsage = new Map<number, number>();
+
+    return pairs.map(([srcIndex, tgtIndex], idx) => {
+        const sourceMachine = machines[srcIndex];
+        const targetMachine = machines[tgtIndex];
+        if (!sourceMachine || !targetMachine) {
+            throw new Error(`Invalid benchmark connection pair: ${srcIndex} -> ${tgtIndex}`);
+        }
+        const srcCount = outputPortCountForType(sourceMachine.type);
+        const tgtCount = inputPortCountForType(targetMachine.type);
+        if (srcCount <= 0 || tgtCount <= 0) {
+            throw new Error(`Benchmark pair targets unsupported ports: ${sourceMachine.id} -> ${targetMachine.id}`);
+        }
+        const sourcePortIndex = (outUsage.get(srcIndex) ?? 0) % srcCount;
+        const targetPortIndex = (inUsage.get(tgtIndex) ?? 0) % tgtCount;
+        outUsage.set(srcIndex, (outUsage.get(srcIndex) ?? 0) + 1);
+        inUsage.set(tgtIndex, (inUsage.get(tgtIndex) ?? 0) + 1);
+
+        return {
+            id: `${prefix}_c${idx}`,
+            sourceMachineId: sourceMachine.id,
+            sourcePortIndex,
+            targetMachineId: targetMachine.id,
+            targetPortIndex,
+        };
+    });
 }
 
 function generateRoutableRandomScenario(spec: RandomScenarioSpec): BenchmarkScenario {

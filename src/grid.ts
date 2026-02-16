@@ -36,6 +36,7 @@ export function createGrid(width: number, height: number): GridState {
         machines: new Map(),
         connections: new Map(),
         beltPaths: new Map(),
+        beltTileUsage: new Map(),
     };
 }
 
@@ -268,6 +269,16 @@ export function cloneGridState(grid: GridState): GridState {
             Array.from(grid.beltPaths.entries()).map(([k, v]) => [
                 k,
                 { connectionId: v.connectionId, segments: v.segments.map((s) => ({ ...s })) },
+            ])
+        ),
+        beltTileUsage: new Map(
+            Array.from(grid.beltTileUsage.entries()).map(([k, v]) => [
+                k,
+                {
+                    horizontalCount: v.horizontalCount,
+                    verticalCount: v.verticalCount,
+                    cornerCount: v.cornerCount,
+                },
             ])
         ),
     };

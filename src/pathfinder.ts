@@ -21,6 +21,14 @@ interface AStarNode {
     direction: Direction | null;
 }
 
+interface OccupiedTileInfo {
+    cornerCount: number;
+    horizontalCount: number;
+    verticalCount: number;
+}
+
+type Axis = 'H' | 'V';
+
 function heuristic(ax: number, ay: number, bx: number, by: number): number {
     return Math.abs(ax - bx) + Math.abs(ay - by);
 }
@@ -29,58 +37,84 @@ function stateKey(x: number, y: number, direction: Direction | null): string {
     return `${x},${y},${direction ?? 'NONE'}`;
 }
 
+function tileKey(x: number, y: number): string {
+    return `${x},${y}`;
+}
+
 const DIRECTIONS: Direction[] = [Direction.UP, Direction.DOWN, Direction.LEFT, Direction.RIGHT];
 
-function isCornerSegment(segment: BeltSegment): boolean {
-    return (
-        segment.fromDirection !== null
-        && segment.toDirection !== null
-        && segment.fromDirection !== segment.toDirection
-    );
+function directionToAxis(direction: Direction): Axis {
+    return direction === Direction.LEFT || direction === Direction.RIGHT ? 'H' : 'V';
 }
 
-function hasExistingCornerAtTile(
+function isCornerSegment(segment: BeltSegment): boolean {
+    if (segment.fromDirection === null || segment.toDirection === null) return false;
+    return directionToAxis(segment.fromDirection) !== directionToAxis(segment.toDirection);
+}
+
+function getSegmentAxis(segment: BeltSegment): Axis | null {
+    if (segment.fromDirection !== null && segment.toDirection !== null) {
+        const fromAxis = directionToAxis(segment.fromDirection);
+        const toAxis = directionToAxis(segment.toDirection);
+        return fromAxis === toAxis ? fromAxis : null;
+    }
+    if (segment.fromDirection !== null) return directionToAxis(segment.fromDirection);
+    if (segment.toDirection !== null) return directionToAxis(segment.toDirection);
+    return null;
+}
+
+function createEmptyOccupiedTileInfo(): OccupiedTileInfo {
+    return {
+        cornerCount: 0,
+        horizontalCount: 0,
+        verticalCount: 0,
+    };
+}
+
+function addSegmentToOccupiedTileInfo(info: OccupiedTileInfo, segment: BeltSegment): void {
+    if (isCornerSegment(segment)) {
+        info.cornerCount++;
+        return;
+    }
+    const axis = getSegmentAxis(segment);
+    if (axis === 'H') info.horizontalCount++;
+    if (axis === 'V') info.verticalCount++;
+}
+
+function buildPathOccupiedInfo(path: BeltPath | undefined): Map<string, OccupiedTileInfo> {
+    const info = new Map<string, OccupiedTileInfo>();
+    if (!path) return info;
+    for (const segment of path.segments) {
+        const key = tileKey(segment.x, segment.y);
+        let entry = info.get(key);
+        if (!entry) {
+            entry = createEmptyOccupiedTileInfo();
+            info.set(key, entry);
+        }
+        addSegmentToOccupiedTileInfo(entry, segment);
+    }
+    return info;
+}
+
+function getEffectiveOccupiedTileInfo(
     grid: GridState,
+    excludedByConnection: Map<string, OccupiedTileInfo>,
     x: number,
     y: number,
-    connectionId: string,
-): boolean {
-    const cell = grid.cells[y][x];
-    if (cell.type !== CellType.BELT || cell.beltConnectionIds.length === 0) return false;
-    for (const existingConnId of cell.beltConnectionIds) {
-        if (existingConnId === connectionId) continue;
-        const path = grid.beltPaths.get(existingConnId);
-        if (!path) continue;
-        const segment = path.segments.find((seg) => seg.x === x && seg.y === y);
-        if (segment && isCornerSegment(segment)) {
-            return true;
-        }
-    }
-    return false;
+): OccupiedTileInfo | null {
+    const key = tileKey(x, y);
+    const base = grid.beltTileUsage.get(key);
+    const excluded = excludedByConnection.get(key);
+    const cornerCount = (base?.cornerCount ?? 0) - (excluded?.cornerCount ?? 0);
+    const horizontalCount = (base?.horizontalCount ?? 0) - (excluded?.horizontalCount ?? 0);
+    const verticalCount = (base?.verticalCount ?? 0) - (excluded?.verticalCount ?? 0);
+    if (cornerCount <= 0 && horizontalCount <= 0 && verticalCount <= 0) return null;
+    return { cornerCount, horizontalCount, verticalCount };
 }
 
-/**
- * Prevents two belts from running parallel on 2+ consecutive shared tiles.
- * Single-tile crossing is allowed.
- */
-function wouldCauseParallelOverlap(
-    grid: GridState,
-    current: AStarNode,
-    nx: number,
-    ny: number,
-    connectionId: string,
-): boolean {
-    const neighborCell = grid.cells[ny][nx];
-    if (neighborCell.type !== CellType.BELT || neighborCell.beltConnectionIds.length === 0) return false;
-
-    const currentCell = grid.cells[current.y][current.x];
-    if (currentCell.type !== CellType.BELT || currentCell.beltConnectionIds.length === 0) return false;
-
-    for (const existingConnId of neighborCell.beltConnectionIds) {
-        if (existingConnId === connectionId) continue;
-        if (currentCell.beltConnectionIds.includes(existingConnId)) return true;
-    }
-    return false;
+function hasAxisUsage(info: OccupiedTileInfo, axis: Axis): boolean {
+    if (axis === 'H') return info.horizontalCount > 0;
+    return info.verticalCount > 0;
 }
 
 /**
@@ -98,6 +132,10 @@ export function findBeltPath(
     if (!isInBounds(grid, start.x, start.y) || !isInBounds(grid, end.x, end.y)) return null;
     if (grid.cells[start.y][start.x].type === CellType.MACHINE) return null;
     if (grid.cells[end.y][end.x].type === CellType.MACHINE) return null;
+    const excludedByConnection = buildPathOccupiedInfo(grid.beltPaths.get(connectionId));
+    const startOccupied = getEffectiveOccupiedTileInfo(grid, excludedByConnection, start.x, start.y);
+    const endOccupied = getEffectiveOccupiedTileInfo(grid, excludedByConnection, end.x, end.y);
+    if ((startOccupied?.cornerCount ?? 0) > 0 || (endOccupied?.cornerCount ?? 0) > 0) return null;
 
     const startDir = sourcePort.approachDirection;
 
@@ -140,10 +178,21 @@ export function findBeltPath(
 
             const cell = grid.cells[ny][nx];
             if (cell.type === CellType.MACHINE) continue;
-            if (wouldCauseParallelOverlap(grid, current, nx, ny, connectionId)) continue;
 
             const isTurn = current.direction !== null && current.direction !== dir;
-            if (isTurn && hasExistingCornerAtTile(grid, current.x, current.y, connectionId)) continue;
+            const currentOccupied = getEffectiveOccupiedTileInfo(grid, excludedByConnection, current.x, current.y);
+            const neighborOccupied = getEffectiveOccupiedTileInfo(grid, excludedByConnection, nx, ny);
+            const moveAxis = directionToAxis(dir);
+
+            if (neighborOccupied) {
+                if (neighborOccupied.cornerCount > 0) continue;
+                if (hasAxisUsage(neighborOccupied, moveAxis)) continue;
+            }
+
+            if (currentOccupied) {
+                if (isTurn) continue;
+                if (hasAxisUsage(currentOccupied, moveAxis)) continue;
+            }
             const turnCost = isTurn ? 2 : 0;
             const crossingCost = cell.type === CellType.BELT ? 0.5 : 0;
             const tentativeG = current.g + 1 + turnCost + crossingCost;
@@ -205,6 +254,32 @@ function reconstructPath(endNode: AStarNode, connectionId: string): BeltPath {
     return { connectionId, segments };
 }
 
+function updateTileUsageForSegment(
+    grid: GridState,
+    segment: BeltSegment,
+    delta: 1 | -1,
+): void {
+    const key = tileKey(segment.x, segment.y);
+    const current = grid.beltTileUsage.get(key) ?? createEmptyOccupiedTileInfo();
+    if (isCornerSegment(segment)) {
+        current.cornerCount += delta;
+    } else {
+        const axis = getSegmentAxis(segment);
+        if (axis === 'H') current.horizontalCount += delta;
+        if (axis === 'V') current.verticalCount += delta;
+    }
+
+    if (current.cornerCount <= 0 && current.horizontalCount <= 0 && current.verticalCount <= 0) {
+        grid.beltTileUsage.delete(key);
+        return;
+    }
+
+    current.cornerCount = Math.max(0, current.cornerCount);
+    current.horizontalCount = Math.max(0, current.horizontalCount);
+    current.verticalCount = Math.max(0, current.verticalCount);
+    grid.beltTileUsage.set(key, current);
+}
+
 /** Apply a belt path to the grid cells */
 export function applyBeltPath(grid: GridState, path: BeltPath): void {
     for (const seg of path.segments) {
@@ -213,6 +288,7 @@ export function applyBeltPath(grid: GridState, path: BeltPath): void {
         if (!cell.beltConnectionIds.includes(path.connectionId)) {
             cell.beltConnectionIds.push(path.connectionId);
         }
+        updateTileUsageForSegment(grid, seg, 1);
     }
     grid.beltPaths.set(path.connectionId, path);
 }
@@ -223,6 +299,7 @@ export function removeBeltPath(grid: GridState, connectionId: string): void {
     if (!path) return;
 
     for (const seg of path.segments) {
+        updateTileUsageForSegment(grid, seg, -1);
         const cell = grid.cells[seg.y][seg.x];
         cell.beltConnectionIds = cell.beltConnectionIds.filter((id) => id !== connectionId);
         if (cell.beltConnectionIds.length === 0 && cell.type === CellType.BELT) {

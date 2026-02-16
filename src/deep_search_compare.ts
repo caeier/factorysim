@@ -1,4 +1,4 @@
-import { evaluateGrid } from './scoring';
+import { compareScoreBreakdownLexicographic, evaluateGrid, type ScoreBreakdown } from './scoring';
 import { runOptimizer } from './optimizer';
 import {
     createAdversarialScenarios,
@@ -9,12 +9,15 @@ import {
 
 interface RunStats {
     scenario: string;
+    start: ScoreBreakdown;
+    final: ScoreBreakdown;
     startScore: number;
     finalScore: number;
     improvement: number;
     runtimeMs: number;
     improvePerSec: number;
     iterations: number;
+    priorityComparison: number;
     regressed: boolean;
 }
 
@@ -67,24 +70,30 @@ async function runConfig(label: string, config: Record<string, unknown>): Promis
     console.log(`\n=== ${label} ===`);
     for (const scenario of scenarios) {
         const grid = createGridFromScenario(scenario);
-        const startScore = evaluateGrid(grid).totalScore;
+        const start = evaluateGrid(grid);
+        const startScore = start.totalScore;
         const seed = stableSeedFromName(scenario.name);
         const startedAt = performance.now();
         const outcome = await runOptimizer(grid, { ...config, seed });
         const runtimeMs = performance.now() - startedAt;
-        const finalScore = outcome.score.totalScore;
+        const final = outcome.score;
+        const finalScore = final.totalScore;
         const improvement = startScore - finalScore;
         const improvePerSec = runtimeMs > 0 ? improvement / (runtimeMs / 1000) : 0;
-        const regressed = finalScore > startScore + 1e-6;
+        const priorityComparison = compareScoreBreakdownLexicographic(final, start);
+        const regressed = priorityComparison > 1e-6;
 
         results.push({
             scenario: scenario.name,
+            start,
+            final,
             startScore,
             finalScore,
             improvement,
             runtimeMs,
             improvePerSec,
             iterations: outcome.iterations,
+            priorityComparison,
             regressed,
         });
 
@@ -95,6 +104,7 @@ async function runConfig(label: string, config: Record<string, unknown>): Promis
                 `start=${startScore.toFixed(1)}`,
                 `final=${finalScore.toFixed(1)}`,
                 `improve=${improvement.toFixed(2)}`,
+                `priority=${priorityComparison < -1e-6 ? 'improved' : priorityComparison > 1e-6 ? 'regressed' : 'tied'}`,
                 `improve/s=${improvePerSec.toFixed(2)}`,
                 `time=${runtimeMs.toFixed(0)}ms`,
                 `iter=${outcome.iterations}`,
@@ -130,7 +140,7 @@ function printABSummary(baseline: RunStats[], upgraded: RunStats[]): void {
         const improvePerSecDelta = u.improvePerSec - b.improvePerSec;
         improvementDeltaTotal += improvementDelta;
         improvePerSecDeltaTotal += improvePerSecDelta;
-        if (u.finalScore < b.finalScore - 1e-6) betterCount++;
+        if (compareScoreBreakdownLexicographic(u.final, b.final) < -1e-6) betterCount++;
     }
 
     const count = Math.max(1, baseline.length);

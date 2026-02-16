@@ -11,7 +11,15 @@ import {
 } from './types';
 import { createGrid, placeMachine, getMachinePorts, cloneGridState, getPortExternalTile } from './grid';
 import { findBeltPath, applyBeltPath, estimateBeltLength } from './pathfinder';
-import { evaluateGrid, type ScoreBreakdown, BELT_WEIGHT, AREA_WEIGHT, CORNER_WEIGHT } from './scoring';
+import {
+    evaluateGrid,
+    type ScoreBreakdown,
+    BELT_WEIGHT,
+    AREA_WEIGHT,
+    CORNER_WEIGHT,
+    compareScoreBreakdownLexicographic,
+    isLexicographicImprovement,
+} from './scoring';
 
 const ORIENTATIONS = [Orientation.NORTH, Orientation.EAST, Orientation.SOUTH, Orientation.WEST];
 
@@ -19,6 +27,22 @@ export interface OptimizerResult {
     grid: GridState;
     score: ScoreBreakdown;
     iterations: number;
+    diagnostics?: OptimizerDiagnostics;
+}
+
+type OptimizerPhaseName = 'Phase 0' | 'Phase 1' | 'Phase 2' | 'Phase 3' | 'Phase 4';
+
+export interface OptimizerPhaseDiagnostics {
+    phase: OptimizerPhaseName;
+    startScore: ScoreBreakdown;
+    endScore: ScoreBreakdown;
+    durationMs: number;
+    iterationDelta: number;
+}
+
+export interface OptimizerDiagnostics {
+    phaseDiagnostics: OptimizerPhaseDiagnostics[];
+    firstStrictImprovementPhase: OptimizerPhaseName | null;
 }
 
 type RandomFn = () => number;
@@ -36,6 +60,7 @@ interface SAProfile {
 interface OptimizerRuntimeConfig {
     mode: OptimizerMode;
     timeBudgetMs: number;
+    diagnostics: boolean;
     phase1Restarts: number;
     phase2Attempts: number;
     localPolishPasses: number;
@@ -101,7 +126,7 @@ interface SAOperatorConfig {
 interface EliteArchiveEntry {
     machines: Machine[];
     connections: Connection[];
-    score: number;
+    score: ScoreBreakdown;
     fingerprint: string;
 }
 
@@ -170,6 +195,15 @@ function enforceFixedMachines(machines: Machine[], fixedMachines: Map<string, Ma
     }
 }
 
+function cloneScoreBreakdown(score: ScoreBreakdown): ScoreBreakdown {
+    return {
+        totalBelts: score.totalBelts,
+        boundingBoxArea: score.boundingBoxArea,
+        cornerCount: score.cornerCount,
+        totalScore: score.totalScore,
+    };
+}
+
 // ─────────────────────────────────────────────────────────
 // PUBLIC API
 // ─────────────────────────────────────────────────────────
@@ -193,10 +227,20 @@ export async function runOptimizer(
     const machines = Array.from(grid.machines.values()).map((m) => ({ ...m }));
     const connections = Array.from(grid.connections.values()).map((c) => ({ ...c }));
     const fixedMachines = buildFixedMachineMap(machines);
-    const hasFixedMachines = fixedMachines.size > 0;
 
     if (machines.length === 0) {
-        return { grid: cloneGridState(grid), score: evaluateGrid(grid), iterations: 0 };
+        const score = evaluateGrid(grid);
+        return {
+            grid: cloneGridState(grid),
+            score,
+            iterations: 0,
+            diagnostics: config.diagnostics
+                ? {
+                    phaseDiagnostics: [],
+                    firstStrictImprovementPhase: null,
+                }
+                : undefined,
+        };
     }
 
     const W = grid.width;
@@ -205,11 +249,40 @@ export async function runOptimizer(
 
     const baselineGrid = cloneGridState(grid);
     const baselineScore = evaluateGrid(grid);
+    const phaseDiagnostics: OptimizerPhaseDiagnostics[] = [];
+    let firstStrictImprovementPhase: OptimizerPhaseName | null = null;
+    let activePhase: {
+        phase: OptimizerPhaseName;
+        startTime: number;
+        startIter: number;
+        startScore: ScoreBreakdown;
+    } | null = null;
     const budgetStart = performance.now();
     const budgetDeadline = Number.isFinite(config.timeBudgetMs)
         ? budgetStart + config.timeBudgetMs
         : Number.POSITIVE_INFINITY;
     const shouldStopForBudget = (): boolean => config.mode === 'deep' && performance.now() >= budgetDeadline;
+    const beginPhase = (phase: OptimizerPhaseName): void => {
+        if (!config.diagnostics) return;
+        activePhase = {
+            phase,
+            startTime: performance.now(),
+            startIter: totalIter,
+            startScore: cloneScoreBreakdown(bestFallback.score),
+        };
+    };
+    const endPhase = (phase: OptimizerPhaseName): void => {
+        if (!config.diagnostics) return;
+        if (!activePhase || activePhase.phase !== phase) return;
+        phaseDiagnostics.push({
+            phase,
+            startScore: activePhase.startScore,
+            endScore: cloneScoreBreakdown(bestFallback.score),
+            durationMs: performance.now() - activePhase.startTime,
+            iterationDelta: Math.max(0, totalIter - activePhase.startIter),
+        });
+        activePhase = null;
+    };
     const operatorConfig: SAOperatorConfig = {
         largeMoveRate: config.largeMoveRate,
         clusterMoveMinSize: Math.min(config.clusterMoveMinSize, config.clusterMoveMaxSize),
@@ -235,13 +308,20 @@ export async function runOptimizer(
         grid: baselineGrid,
         score: baselineScore,
     };
-    const rememberFallback = (candidateMachines: Machine[], candidateConnections: Connection[]): void => {
+    const rememberFallback = (
+        candidateMachines: Machine[],
+        candidateConnections: Connection[],
+        phase?: OptimizerPhaseName,
+    ): void => {
         enforceFixedMachines(candidateMachines, fixedMachines);
         const built = buildGrid(candidateMachines, candidateConnections, W, H);
         if (!built) return;
         const score = evaluateGrid(built);
-        if (score.totalScore < bestFallback.score.totalScore) {
+        if (compareScoreBreakdownLexicographic(score, bestFallback.score) < 0) {
             bestFallback = { grid: cloneGridState(built), score };
+            if (!firstStrictImprovementPhase && phase && isLexicographicImprovement(score, baselineScore)) {
+                firstStrictImprovementPhase = phase;
+            }
         }
     };
     const rememberElite = (candidateMachines: Machine[], candidateConnections: Connection[]): void => {
@@ -249,21 +329,25 @@ export async function runOptimizer(
         enforceFixedMachines(candidateMachines, fixedMachines);
         const fingerprint = buildLayoutFingerprint(candidateMachines);
         const routed = buildAndScore(candidateMachines, candidateConnections, W, H);
-        const routedScore = routed?.score.totalScore;
-        const fastScore = scorePlacement(candidateMachines, candidateConnections, W, H, true);
-        const score = Number.isFinite(routedScore)
-            ? routedScore!
-            : Number.isFinite(fastScore)
-                ? fastScore + 1000
-                : Infinity;
-        if (!Number.isFinite(score)) return;
+        const score = routed
+            ? routed.score
+            : applyUnroutablePenalty(
+                computeFastScoreBreakdown(
+                    candidateMachines,
+                    candidateConnections,
+                    new Map(candidateMachines.map((machine) => [machine.id, machine])),
+                ),
+                candidateMachines.length,
+                candidateConnections.length,
+            );
+        if (!Number.isFinite(score.totalScore)) return;
 
         if (config.eliteDiversityHash || config.eliteMinDistance > 0) {
             for (const entry of eliteArchive) {
                 const sameHash = config.eliteDiversityHash && entry.fingerprint === fingerprint;
                 const tooClose = config.eliteMinDistance > 0
                     && layoutDistance(candidateMachines, entry.machines) < config.eliteMinDistance;
-                if ((sameHash || tooClose) && score >= entry.score) {
+                if ((sameHash || tooClose) && compareScoreBreakdownLexicographic(score, entry.score) >= 0) {
                     return;
                 }
             }
@@ -285,7 +369,7 @@ export async function runOptimizer(
             score,
             fingerprint,
         });
-        eliteArchive.sort((a, b) => a.score - b.score);
+        eliteArchive.sort((a, b) => compareScoreBreakdownLexicographic(a.score, b.score));
         if (eliteArchive.length > config.elitePoolSize) {
             eliteArchive.splice(config.elitePoolSize);
         }
@@ -333,7 +417,8 @@ export async function runOptimizer(
     rememberElite(machines, connections);
 
     // ── Phase 0: Build deterministic seeds and pick the best ──
-    const useExplorationSeeds = config.useExplorationSeeds && !hasFixedMachines;
+    beginPhase('Phase 0');
+    const useExplorationSeeds = config.useExplorationSeeds;
     const seedCandidates: { name: string; machines: Machine[] }[] = useExplorationSeeds
         ? [
             { name: 'Greedy placement', machines: portAwareGreedyPlace(machines, connections, W, H) },
@@ -355,7 +440,7 @@ export async function runOptimizer(
 
     let startMachines = seedCandidates[0].machines.map((m) => ({ ...m }));
     let bestSeedFastScore = Infinity;
-    let bestSeedRoutedScore = Infinity;
+    let bestSeedRoutedScore: ScoreBreakdown | null = null;
     let hasRoutedSeed = false;
     let bestPhase0Score: ScoreBreakdown | null = null;
 
@@ -367,14 +452,14 @@ export async function runOptimizer(
         enforceFixedMachines(candidateMachines, fixedMachines);
         optimizePortAssignments(candidateMachines, candidateConnections, W, H);
 
-        rememberFallback(candidateMachines, candidateConnections);
+        rememberFallback(candidateMachines, candidateConnections, 'Phase 0');
         rememberElite(candidateMachines, candidateConnections);
         const scored = buildAndScore(candidateMachines, candidateConnections, W, H);
-        if (scored && (!bestPhase0Score || scored.score.totalScore < bestPhase0Score.totalScore)) {
+        if (scored && (!bestPhase0Score || compareScoreBreakdownLexicographic(scored.score, bestPhase0Score) < 0)) {
             bestPhase0Score = scored.score;
         }
-        if (scored && scored.score.totalScore < bestSeedRoutedScore) {
-            bestSeedRoutedScore = scored.score.totalScore;
+        if (scored && (!bestSeedRoutedScore || compareScoreBreakdownLexicographic(scored.score, bestSeedRoutedScore) < 0)) {
+            bestSeedRoutedScore = scored.score;
             hasRoutedSeed = true;
             startMachines = candidateMachines.map((m) => ({ ...m }));
             connections.length = 0;
@@ -397,8 +482,10 @@ export async function runOptimizer(
             config.mode === 'deep' ? 'Phase 0: Current-layout seed' : 'Phase 0: Seed placement',
         );
     }
+    endPhase('Phase 0');
 
     // ── Phase 1: Fast SA with optional restarts ───────────
+    beginPhase('Phase 1');
     let phase1Best = startMachines.map((m) => ({ ...m }));
     let phase1BestScore = scorePlacement(phase1Best, connections, W, H, true);
     const phase1Restarts = Math.max(1, config.phase1Restarts);
@@ -432,7 +519,7 @@ export async function runOptimizer(
 
         totalIter += runIterations;
         enforceFixedMachines(phase1Machines, fixedMachines);
-        rememberFallback(phase1Machines, connections);
+        rememberFallback(phase1Machines, connections, 'Phase 1');
         rememberElite(phase1Machines, connections);
 
         const candidateScore = scorePlacement(phase1Machines, connections, W, H, true);
@@ -450,10 +537,12 @@ export async function runOptimizer(
     // ── Phase 1.5: Early port assignment optimization ──
     const phase1PortOpt = optimizePortAssignments(phase1Best, connections, W, H);
     enforceFixedMachines(phase1PortOpt, fixedMachines);
-    rememberFallback(phase1PortOpt, connections);
+    rememberFallback(phase1PortOpt, connections, 'Phase 1');
     rememberElite(phase1PortOpt, connections);
+    endPhase('Phase 1');
 
     // ── Phase 2: A*-verified SA fine-tuning (multi-attempt in deep mode) ──
+    beginPhase('Phase 2');
     let phase2Best = phase1PortOpt.map((m) => ({ ...m }));
     let phase2BestScore = scorePlacement(phase2Best, connections, W, H, false);
     const phase2Attempts = Math.max(1, config.phase2Attempts);
@@ -487,7 +576,7 @@ export async function runOptimizer(
 
         totalIter += runIterations;
         enforceFixedMachines(phase2Machines, fixedMachines);
-        rememberFallback(phase2Machines, connections);
+        rememberFallback(phase2Machines, connections, 'Phase 2');
         rememberElite(phase2Machines, connections);
 
         const candidateScore = scorePlacement(phase2Machines, connections, W, H, false);
@@ -501,24 +590,28 @@ export async function runOptimizer(
             phase2Seed = tryArchiveRestartSeed(phase2Best, false);
         }
     }
+    endPhase('Phase 2');
 
     // ── Phase 3: Final port assignment optimization ────
+    beginPhase('Phase 3');
     const phase3Machines = optimizePortAssignments(phase2Best, connections, W, H);
     enforceFixedMachines(phase3Machines, fixedMachines);
-    rememberFallback(phase3Machines, connections);
+    rememberFallback(phase3Machines, connections, 'Phase 3');
     rememberElite(phase3Machines, connections);
+    endPhase('Phase 3');
 
     // ── Phase 4: Compaction + orientation polish ──────
+    beginPhase('Phase 4');
     let polished = phase3Machines.map((m) => ({ ...m }));
     const polishPasses = Math.max(1, config.localPolishPasses);
     for (let pass = 0; pass < polishPasses; pass++) {
         if (shouldStopForBudget()) break;
 
         const compacted = compactLayout(polished, connections, W, H, fixedMachines);
-        rememberFallback(compacted, connections);
+        rememberFallback(compacted, connections, 'Phase 4');
         rememberElite(compacted, connections);
         polished = optimizeOrientationsUsingAStar(compacted, connections, W, H, fixedMachines);
-        rememberFallback(polished, connections);
+        rememberFallback(polished, connections, 'Phase 4');
         rememberElite(polished, connections);
 
         if (config.mode === 'deep' && pass + 1 < polishPasses) {
@@ -550,7 +643,7 @@ export async function runOptimizer(
             );
             totalIter += runIterations;
             enforceFixedMachines(polishedBySA, fixedMachines);
-            rememberFallback(polishedBySA, connections);
+            rememberFallback(polishedBySA, connections, 'Phase 4');
             rememberElite(polishedBySA, connections);
             polished = polishedBySA;
         }
@@ -565,19 +658,23 @@ export async function runOptimizer(
             }
         }
     }
+    endPhase('Phase 4');
 
     enforceFixedMachines(polished, fixedMachines);
     rememberElite(polished, connections);
     const finalResult = buildGrid(polished, connections, W, H);
     if (finalResult) {
         const finalScore = evaluateGrid(finalResult);
-        if (finalScore.totalScore < bestFallback.score.totalScore) {
+        if (compareScoreBreakdownLexicographic(finalScore, bestFallback.score) < 0) {
             bestFallback = { grid: finalResult, score: finalScore };
+            if (!firstStrictImprovementPhase && isLexicographicImprovement(finalScore, baselineScore)) {
+                firstStrictImprovementPhase = 'Phase 4';
+            }
         }
     }
 
     // Never return a worse result than the starting layout.
-    if (baselineScore.totalScore < bestFallback.score.totalScore) {
+    if (compareScoreBreakdownLexicographic(baselineScore, bestFallback.score) < 0) {
         bestFallback = { grid: baselineGrid, score: baselineScore };
     }
 
@@ -595,6 +692,12 @@ export async function runOptimizer(
         grid: bestFallback.grid,
         score: bestFallback.score,
         iterations: totalIter,
+        diagnostics: config.diagnostics
+            ? {
+                phaseDiagnostics,
+                firstStrictImprovementPhase,
+            }
+            : undefined,
     };
 }
 
@@ -603,6 +706,7 @@ function normalizeOptimizerConfig(config: Record<string, unknown>): OptimizerRun
     const defaults = mode === 'deep'
         ? {
             timeBudgetMs: 7000,
+            diagnostics: false,
             phase1Restarts: 3,
             phase2Attempts: 3,
             localPolishPasses: 3,
@@ -630,6 +734,7 @@ function normalizeOptimizerConfig(config: Record<string, unknown>): OptimizerRun
         }
         : {
             timeBudgetMs: Number.POSITIVE_INFINITY,
+            diagnostics: false,
             phase1Restarts: 1,
             phase2Attempts: 1,
             localPolishPasses: 1,
@@ -664,6 +769,7 @@ function normalizeOptimizerConfig(config: Record<string, unknown>): OptimizerRun
     return {
         mode,
         timeBudgetMs: pickPositiveNumber(config.timeBudgetMs, defaults.timeBudgetMs),
+        diagnostics: pickBoolean(config.diagnostics, defaults.diagnostics),
         phase1Restarts: pickPositiveInteger(config.phase1Restarts, defaults.phase1Restarts),
         phase2Attempts: pickPositiveInteger(config.phase2Attempts, defaults.phase2Attempts),
         localPolishPasses: pickPositiveInteger(config.localPolishPasses, defaults.localPolishPasses),
@@ -1420,7 +1526,7 @@ function twoLayerExhaustivePlace(
     const topPerms = generatePermutations(topLayer);
     const bottomPerms = generatePermutations(bottomLayer);
 
-    let best: { machines: Machine[]; score: number } | null = null;
+    let best: { machines: Machine[]; score: ScoreBreakdown } | null = null;
     for (const topOrder of topPerms) {
         for (const bottomOrder of bottomPerms) {
             const candidate = base.map((m) => ({ ...m }));
@@ -1450,10 +1556,10 @@ function twoLayerExhaustivePlace(
             const scored = buildAndScore(candidate, candidateConnections, gridW, gridH);
             if (!scored) continue;
 
-            if (!best || scored.score.totalScore < best.score) {
+            if (!best || compareScoreBreakdownLexicographic(scored.score, best.score) < 0) {
                 best = {
                     machines: candidate.map((m) => ({ ...m })),
-                    score: scored.score.totalScore,
+                    score: scored.score,
                 };
             }
         }
@@ -1923,9 +2029,16 @@ function runSAAsync(
         let currentScore = scorePlacement(current, connections, gridW, gridH, config.useFastScore);
         let best = current.map((m) => ({ ...m }));
         let bestScore = currentScore;
+        let bestLexic = best.map((m) => ({ ...m }));
+        let bestLexicBreakdown = computeFastScoreBreakdown(
+            bestLexic,
+            connections,
+            new Map(bestLexic.map((machine) => [machine.id, machine])),
+        );
         let temp = config.initialTemp;
         let iter = 0;
         let stagnation = 0;
+        let stagnationEscapes = 0;
         let iterationsSinceBest = 0;
         let largeMoveCooldownRemaining = 0;
         const random = config.random ?? Math.random;
@@ -2019,7 +2132,7 @@ function runSAAsync(
 
         function step() {
             if (shouldStop()) {
-                resolve(best);
+                resolve(bestLexic);
                 return;
             }
 
@@ -2055,6 +2168,19 @@ function runSAAsync(
                             currentScore = candidateScore;
                             gain = Math.max(0, preMoveScore - candidateScore);
                             stats.accepted++;
+                            const candidateFastBreakdown = computeFastScoreBreakdown(
+                                candidate,
+                                connections,
+                                new Map(candidate.map((machine) => [machine.id, machine])),
+                            );
+                            if (
+                                Number.isFinite(candidateFastBreakdown.totalScore)
+                                && compareScoreBreakdownLexicographic(candidateFastBreakdown, bestLexicBreakdown) < 0
+                            ) {
+                                bestLexicBreakdown = candidateFastBreakdown;
+                                bestLexic = candidate.map((m) => ({ ...m }));
+                                improvedBest = true;
+                            }
                             if (candidateScore < bestScore) {
                                 const bestImprovement = bestScore - candidateScore;
                                 bestScore = candidateScore;
@@ -2089,15 +2215,15 @@ function runSAAsync(
             }
 
             if (onProgress) {
-                const breakdown = buildAndScore(best, connections, gridW, gridH);
+                const breakdown = buildAndScore(bestLexic, connections, gridW, gridH);
                 if (breakdown) {
                     onProgress(breakdown.score, iter);
                 } else {
                     // A* routing failed — report proxy score components.
                     const fastBreakdown = computeFastScoreBreakdown(
-                        best,
+                        bestLexic,
                         connections,
-                        new Map(best.map((m) => [m.id, m])),
+                        new Map(bestLexic.map((m) => [m.id, m])),
                     );
                     if (fastBreakdown.totalScore < Infinity) {
                         onProgress(fastBreakdown, iter);
@@ -2108,20 +2234,84 @@ function runSAAsync(
             // Reheat if stagnating
             if (stagnation > 5 && temp > config.minTemp) {
                 temp = Math.min(config.initialTemp * 0.5, temp * 3);
-                current = best.map((m) => ({ ...m }));
-                currentScore = bestScore;
+                current = bestLexic.map((m) => ({ ...m }));
+                currentScore = scorePlacement(current, connections, gridW, gridH, config.useFastScore);
+                const escapeCandidate = tryStagnationEscapeKick(
+                    bestLexic,
+                    bestScore,
+                    connections,
+                    gridW,
+                    gridH,
+                    config.useFastScore,
+                    random,
+                    activeOperatorConfig,
+                    fixedMachineIds,
+                    stagnationEscapes,
+                );
+                if (escapeCandidate) {
+                    current = escapeCandidate.machines;
+                    currentScore = escapeCandidate.score;
+                }
+                stagnationEscapes++;
                 stagnation = 0;
             }
 
             if (temp > config.minTemp && !shouldStop()) {
                 setTimeout(step, 0);
             } else {
-                resolve(best);
+                resolve(bestLexic);
             }
         }
 
         setTimeout(step, 0);
     });
+}
+
+function tryStagnationEscapeKick(
+    best: Machine[],
+    _bestScore: number,
+    connections: Connection[],
+    gridW: number,
+    gridH: number,
+    useFastScore: boolean,
+    random: RandomFn,
+    operatorConfig: SAOperatorConfig,
+    fixedMachineIds: Set<string>,
+    escapeCount: number,
+): { machines: Machine[]; score: number } | null {
+    const forcedOperators: MoveOperatorId[] = [
+        'critical_net_focus',
+        'cluster_destroy_repair',
+        'port_facing_jump',
+        'joint_move_rotate',
+    ];
+    const escapeAttempts = 2 + Math.min(2, escapeCount % 2);
+    let picked: { machines: Machine[]; score: number } | null = null;
+
+    for (let attempt = 0; attempt < escapeAttempts; attempt++) {
+        let candidate = best.map((machine) => ({ ...machine }));
+        const kickCount = 3 + ((escapeCount + attempt) % 4);
+        for (let i = 0; i < kickCount; i++) {
+            const forcedOperator = forcedOperators[(i + escapeCount + attempt) % forcedOperators.length];
+            candidate = perturbSmart(
+                candidate,
+                connections,
+                gridW,
+                gridH,
+                random,
+                operatorConfig,
+                forcedOperator,
+                fixedMachineIds,
+            );
+        }
+        const candidateScore = scorePlacement(candidate, connections, gridW, gridH, useFastScore);
+        if (!Number.isFinite(candidateScore)) continue;
+        if (!picked || candidateScore < picked.score) {
+            picked = { machines: candidate, score: candidateScore };
+        }
+    }
+
+    return picked;
 }
 
 function buildAdaptiveOperatorConfig(
@@ -2280,13 +2470,9 @@ function scorePlacement(
         }
         // A* routing failed — fall back to fast scoring with a substantial
         // penalty so SA does not camp in unroutable regions.
-        const fastScore = computeFastScore(machines, connections, machineMap);
-        if (fastScore === Infinity) return Infinity;
-        const unroutablePenalty =
-            UNROUTABLE_BASE_PENALTY
-            + connections.length * UNROUTABLE_PER_CONNECTION_PENALTY
-            + machines.length * UNROUTABLE_PER_MACHINE_PENALTY;
-        return fastScore + unroutablePenalty;
+        const fastBreakdown = computeFastScoreBreakdown(machines, connections, machineMap);
+        if (!Number.isFinite(fastBreakdown.totalScore)) return Infinity;
+        return applyUnroutablePenalty(fastBreakdown, machines.length, connections.length).totalScore;
     }
 }
 
@@ -2297,6 +2483,28 @@ function computeFastScore(
     machineMap: Map<string, Machine>,
 ): number {
     return computeFastScoreBreakdown(machines, connections, machineMap).totalScore;
+}
+
+function applyUnroutablePenalty(
+    breakdown: ScoreBreakdown,
+    machineCount: number,
+    connectionCount: number,
+): ScoreBreakdown {
+    const unroutablePenalty =
+        UNROUTABLE_BASE_PENALTY
+        + connectionCount * UNROUTABLE_PER_CONNECTION_PENALTY
+        + machineCount * UNROUTABLE_PER_MACHINE_PENALTY;
+    const totalBelts = breakdown.totalBelts + unroutablePenalty;
+    const totalScore =
+        totalBelts * BELT_WEIGHT
+        + breakdown.boundingBoxArea * AREA_WEIGHT
+        + breakdown.cornerCount * CORNER_WEIGHT;
+    return {
+        totalBelts,
+        boundingBoxArea: breakdown.boundingBoxArea,
+        cornerCount: breakdown.cornerCount,
+        totalScore,
+    };
 }
 
 function computeFastScoreBreakdown(
@@ -2653,7 +2861,7 @@ function applyRepairBeamCandidates(
     const original = machines.map((machine) => ({ ...machine }));
     const attempts = Math.max(1, Math.floor(beamWidth));
     let bestCandidate: Machine[] | null = null;
-    let bestScore = Infinity;
+    let bestScore: ScoreBreakdown | null = null;
 
     for (let attempt = 0; attempt < attempts; attempt++) {
         const candidate = original.map((machine) => ({ ...machine }));
@@ -2664,9 +2872,16 @@ function applyRepairBeamCandidates(
             );
         const succeeded = applyCandidate(candidate, candidateRandom);
         if (!succeeded) continue;
-        const candidateScore = scorePlacement(candidate, connections, gridW, gridH, false);
-        if (!Number.isFinite(candidateScore)) continue;
-        if (candidateScore < bestScore) {
+        const routed = buildAndScore(candidate, connections, gridW, gridH);
+        const candidateScore = routed
+            ? routed.score
+            : applyUnroutablePenalty(
+                computeFastScoreBreakdown(candidate, connections, new Map(candidate.map((m) => [m.id, m]))),
+                candidate.length,
+                connections.length,
+            );
+        if (!Number.isFinite(candidateScore.totalScore)) continue;
+        if (!bestScore || compareScoreBreakdownLexicographic(candidateScore, bestScore) < 0) {
             bestScore = candidateScore;
             bestCandidate = candidate;
         }
@@ -3348,15 +3563,17 @@ function chooseConnectionAssignment(
     const optimizedRouted = buildAndScore(machines, optimizedConns, gridW, gridH);
 
     if (originalRouted && optimizedRouted) {
-        return optimizedRouted.score.totalScore <= originalRouted.score.totalScore ? optimizedConns : originalConns;
+        return compareScoreBreakdownLexicographic(optimizedRouted.score, originalRouted.score) <= 0
+            ? optimizedConns
+            : originalConns;
     }
     if (optimizedRouted) return optimizedConns;
     if (originalRouted) return originalConns;
 
     const machineMap = new Map(machines.map((m) => [m.id, m]));
-    const originalFast = computeFastScore(machines, originalConns, machineMap);
-    const optimizedFast = computeFastScore(machines, optimizedConns, machineMap);
-    return optimizedFast <= originalFast ? optimizedConns : originalConns;
+    const originalFast = computeFastScoreBreakdown(machines, originalConns, machineMap);
+    const optimizedFast = computeFastScoreBreakdown(machines, optimizedConns, machineMap);
+    return compareScoreBreakdownLexicographic(optimizedFast, originalFast) <= 0 ? optimizedConns : originalConns;
 }
 
 // ─────────────────────────────────────────────────────────
@@ -3376,7 +3593,7 @@ function compactLayout(
 ): Machine[] {
     const baseline = machines.map((m) => ({ ...m }));
     enforceFixedMachines(baseline, fixedMachines);
-    const baselineScore = scorePlacement(baseline, connections, gridW, gridH, false);
+    const baselineRouted = buildAndScore(baseline, connections, gridW, gridH);
     const result = baseline.map((m) => ({ ...m }));
     enforceFixedMachines(result, fixedMachines);
     const allIds = new Set(result.map((m) => m.id));
@@ -3428,8 +3645,18 @@ function compactLayout(
         enforceFixedMachines(result, fixedMachines);
     }
 
-    const compactedScore = scorePlacement(result, connections, gridW, gridH, false);
-    return compactedScore <= baselineScore ? result : baseline;
+    const compactedRouted = buildAndScore(result, connections, gridW, gridH);
+    if (baselineRouted && compactedRouted) {
+        return compareScoreBreakdownLexicographic(compactedRouted.score, baselineRouted.score) <= 0 ? result : baseline;
+    }
+    if (compactedRouted) return result;
+    if (baselineRouted) return baseline;
+
+    const baselineMachineMap = new Map(baseline.map((m) => [m.id, m]));
+    const compactedMachineMap = new Map(result.map((m) => [m.id, m]));
+    const baselineFast = computeFastScoreBreakdown(baseline, connections, baselineMachineMap);
+    const compactedFast = computeFastScoreBreakdown(result, connections, compactedMachineMap);
+    return compareScoreBreakdownLexicographic(compactedFast, baselineFast) <= 0 ? result : baseline;
 }
 
 // ─────────────────────────────────────────────────────────

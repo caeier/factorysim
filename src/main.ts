@@ -60,6 +60,8 @@ let dragStartX = 0;
 let dragStartY = 0;
 let dragMachineOrigX = 0;
 let dragMachineOrigY = 0;
+let dragMoved = false;
+let dragBeltsDetached = false;
 
 // Pan state
 let isPanning = false;
@@ -451,7 +453,10 @@ canvas.addEventListener('mousemove', (e) => {
 
     if (newX !== machine.x || newY !== machine.y) {
       removeMachine(grid, machine.id);
-      removeConnectionBelts(machine.id);
+      if (!dragBeltsDetached) {
+        removeConnectionBelts(machine.id);
+        dragBeltsDetached = true;
+      }
       machine.x = newX;
       machine.y = newY;
       if (!placeMachine(grid, machine)) {
@@ -460,16 +465,26 @@ canvas.addEventListener('mousemove', (e) => {
         machine.y = dragMachineOrigY;
         placeMachine(grid, machine);
       }
-      rerouteConnectionBelts(machine.id);
+      dragMoved = true;
       requestRender();
     }
   }
 });
 
-canvas.addEventListener('mouseup', () => {
+function finishPointerInteraction(): void {
+  if (isDragging && selectedMachineId && dragBeltsDetached && dragMoved) {
+    rerouteConnectionBelts(selectedMachineId);
+    updateScore();
+    requestRender();
+  }
   isDragging = false;
+  dragMoved = false;
+  dragBeltsDetached = false;
   isPanning = false;
-});
+}
+
+canvas.addEventListener('mouseup', finishPointerInteraction);
+window.addEventListener('mouseup', finishPointerInteraction);
 
 canvas.addEventListener('wheel', (e) => {
   e.preventDefault();
@@ -518,6 +533,8 @@ function handleSelect(gx: number, gy: number, e: MouseEvent): void {
 
     // Start dragging
     isDragging = true;
+    dragMoved = false;
+    dragBeltsDetached = false;
     dragStartX = e.clientX;
     dragStartY = e.clientY;
     const machine = grid.machines.get(cell.machineId)!;

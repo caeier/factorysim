@@ -1,4 +1,4 @@
-import { evaluateGrid } from './scoring';
+import { compareScoreBreakdownLexicographic, evaluateGrid, type ScoreBreakdown } from './scoring';
 import { runOptimizer } from './optimizer';
 import {
     type BenchmarkScenario,
@@ -10,12 +10,12 @@ import {
 
 interface ScenarioResult {
     name: string;
-    startScore: number;
-    finalScore: number;
-    improvement: number;
+    start: ScoreBreakdown;
+    final: ScoreBreakdown;
+    totalScoreDelta: number;
     runtimeMs: number;
     iterations: number;
-    regressed: boolean;
+    priorityComparison: number;
 }
 
 const DEEP_BENCHMARK_CONFIG = {
@@ -46,22 +46,22 @@ const DEEP_BENCHMARK_CONFIG = {
 
 async function runScenario(scenario: BenchmarkScenario): Promise<ScenarioResult> {
     const startGrid = createGridFromScenario(scenario);
-    const startScore = evaluateGrid(startGrid).totalScore;
+    const start = evaluateGrid(startGrid);
     const seed = stableSeedFromName(scenario.name);
 
     const startedAt = performance.now();
     const result = await runOptimizer(startGrid, { ...DEEP_BENCHMARK_CONFIG, seed });
     const runtimeMs = performance.now() - startedAt;
-    const finalScore = result.score.totalScore;
+    const final = result.score;
 
     return {
         name: scenario.name,
-        startScore,
-        finalScore,
-        improvement: startScore - finalScore,
+        start,
+        final,
+        totalScoreDelta: start.totalScore - final.totalScore,
         runtimeMs,
         iterations: result.iterations,
-        regressed: finalScore > startScore + 1e-6,
+        priorityComparison: compareScoreBreakdownLexicographic(final, start),
     };
 }
 
@@ -71,13 +71,16 @@ async function runGroup(label: string, scenarios: BenchmarkScenario[]): Promise<
     for (const scenario of scenarios) {
         const outcome = await runScenario(scenario);
         results.push(outcome);
-        const regressionFlag = outcome.regressed ? '  [REGRESSION]' : '';
+        const priorityStatus = formatPriorityStatus(outcome.priorityComparison);
+        const regressionFlag = outcome.priorityComparison > 1e-6 ? '  [PRIORITY REGRESSION]' : '';
         console.log(
             [
                 `- ${outcome.name}`,
-                `start=${outcome.startScore.toFixed(1)}`,
-                `final=${outcome.finalScore.toFixed(1)}`,
-                `improve=${outcome.improvement.toFixed(1)}`,
+                `belts ${outcome.start.totalBelts.toFixed(1)} -> ${outcome.final.totalBelts.toFixed(1)}`,
+                `area ${outcome.start.boundingBoxArea.toFixed(1)} -> ${outcome.final.boundingBoxArea.toFixed(1)}`,
+                `corners ${outcome.start.cornerCount.toFixed(1)} -> ${outcome.final.cornerCount.toFixed(1)}`,
+                `score ${outcome.start.totalScore.toFixed(1)} -> ${outcome.final.totalScore.toFixed(1)} (delta=${outcome.totalScoreDelta.toFixed(1)})`,
+                `priority=${priorityStatus}`,
                 `time=${outcome.runtimeMs.toFixed(0)}ms`,
                 `iter=${outcome.iterations}`,
             ].join(' | ') + regressionFlag,
@@ -87,17 +90,34 @@ async function runGroup(label: string, scenarios: BenchmarkScenario[]): Promise<
 }
 
 function printSummary(label: string, results: ScenarioResult[]): void {
-    const finalScores = results.map((r) => r.finalScore);
+    const finalBelts = results.map((r) => r.final.totalBelts);
+    const finalAreas = results.map((r) => r.final.boundingBoxArea);
+    const finalCorners = results.map((r) => r.final.cornerCount);
+    const finalScores = results.map((r) => r.final.totalScore);
     const runtimes = results.map((r) => r.runtimeMs);
     const iterations = results.map((r) => r.iterations);
-    const improvements = results.map((r) => r.improvement);
+    const scoreDeltas = results.map((r) => r.totalScoreDelta);
+    const beltsStats = summarize(finalBelts);
+    const areaStats = summarize(finalAreas);
+    const cornerStats = summarize(finalCorners);
     const scoreStats = summarize(finalScores);
     const runtimeStats = summarize(runtimes);
     const iterStats = summarize(iterations);
-    const improveStats = summarize(improvements);
-    const regressionCount = results.filter((r) => r.regressed).length;
+    const deltaStats = summarize(scoreDeltas);
+    const improvedCount = results.filter((r) => r.priorityComparison < -1e-6).length;
+    const tiedCount = results.filter((r) => Math.abs(r.priorityComparison) <= 1e-6).length;
+    const regressionCount = results.filter((r) => r.priorityComparison > 1e-6).length;
 
     console.log(`\n--- ${label} summary ---`);
+    console.log(
+        `final belts: mean=${beltsStats.mean.toFixed(2)} p50=${beltsStats.p50.toFixed(2)} p90=${beltsStats.p90.toFixed(2)}`,
+    );
+    console.log(
+        `final area:  mean=${areaStats.mean.toFixed(2)} p50=${areaStats.p50.toFixed(2)} p90=${areaStats.p90.toFixed(2)}`,
+    );
+    console.log(
+        `final corner: mean=${cornerStats.mean.toFixed(2)} p50=${cornerStats.p50.toFixed(2)} p90=${cornerStats.p90.toFixed(2)}`,
+    );
     console.log(
         `final score: mean=${scoreStats.mean.toFixed(2)} p50=${scoreStats.p50.toFixed(2)} p90=${scoreStats.p90.toFixed(2)}`,
     );
@@ -108,9 +128,9 @@ function printSummary(label: string, results: ScenarioResult[]): void {
         `iterations:  mean=${iterStats.mean.toFixed(0)} p50=${iterStats.p50.toFixed(0)} p90=${iterStats.p90.toFixed(0)}`,
     );
     console.log(
-        `improvement: mean=${improveStats.mean.toFixed(2)} p50=${improveStats.p50.toFixed(2)} p90=${improveStats.p90.toFixed(2)}`,
+        `score delta: mean=${deltaStats.mean.toFixed(2)} p50=${deltaStats.p50.toFixed(2)} p90=${deltaStats.p90.toFixed(2)}`,
     );
-    console.log(`no-regression violations: ${regressionCount}/${results.length}`);
+    console.log(`priority result counts: improved=${improvedCount} tied=${tiedCount} regressed=${regressionCount}`);
 }
 
 function stableSeedFromName(name: string): number {
@@ -120,6 +140,12 @@ function stableSeedFromName(name: string): number {
         hash = Math.imul(hash, 16777619);
     }
     return hash >>> 0;
+}
+
+function formatPriorityStatus(comparison: number): string {
+    if (comparison < -1e-6) return 'improved';
+    if (comparison > 1e-6) return 'regressed';
+    return 'tied';
 }
 
 async function runBenchmark(): Promise<void> {

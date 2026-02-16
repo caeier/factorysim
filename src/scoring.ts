@@ -10,6 +10,7 @@ export interface ScoreBreakdown {
 export const BELT_WEIGHT = 1.0;
 export const AREA_WEIGHT = 0.5;
 export const CORNER_WEIGHT = 0.3;
+export const SCORE_EPSILON = 1e-6;
 
 export function evaluateGrid(grid: GridState): ScoreBreakdown {
     let totalBelts = 0;
@@ -53,4 +54,29 @@ export function evaluateGrid(grid: GridState): ScoreBreakdown {
         cornerCount * CORNER_WEIGHT;
 
     return { totalBelts, boundingBoxArea, cornerCount, totalScore };
+}
+
+export function compareScoreBreakdownLexicographic(
+    a: ScoreBreakdown,
+    b: ScoreBreakdown,
+    epsilon = SCORE_EPSILON,
+): number {
+    if (Math.abs(a.totalBelts - b.totalBelts) > epsilon) {
+        return a.totalBelts - b.totalBelts;
+    }
+    if (Math.abs(a.boundingBoxArea - b.boundingBoxArea) > epsilon) {
+        return a.boundingBoxArea - b.boundingBoxArea;
+    }
+    if (Math.abs(a.cornerCount - b.cornerCount) > epsilon) {
+        return a.cornerCount - b.cornerCount;
+    }
+    return 0;
+}
+
+export function isLexicographicImprovement(
+    candidate: ScoreBreakdown,
+    baseline: ScoreBreakdown,
+    epsilon = SCORE_EPSILON,
+): boolean {
+    return compareScoreBreakdownLexicographic(candidate, baseline, epsilon) < 0;
 }

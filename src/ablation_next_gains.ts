@@ -1,4 +1,4 @@
-import { evaluateGrid } from './scoring';
+import { compareScoreBreakdownLexicographic, evaluateGrid, type ScoreBreakdown } from './scoring';
 import { runOptimizer } from './optimizer';
 import {
     createAdversarialScenarios,
@@ -9,11 +9,14 @@ import {
 
 interface ScenarioRun {
     scenario: string;
+    start: ScoreBreakdown;
+    final: ScoreBreakdown;
     startScore: number;
     finalScore: number;
     improvement: number;
     runtimeMs: number;
     iterations: number;
+    priorityComparison: number;
     regressed: boolean;
 }
 
@@ -124,22 +127,28 @@ async function runConfig(named: NamedConfig): Promise<ScenarioRun[]> {
 
     for (const scenario of SCENARIOS) {
         const grid = createGridFromScenario(scenario);
-        const startScore = evaluateGrid(grid).totalScore;
+        const start = evaluateGrid(grid);
+        const startScore = start.totalScore;
         const seed = stableSeedFromName(scenario.name);
         const startedAt = performance.now();
         const result = await runOptimizer(grid, { ...named.config, seed });
         const runtimeMs = performance.now() - startedAt;
-        const finalScore = result.score.totalScore;
+        const final = result.score;
+        const finalScore = final.totalScore;
         const improvement = startScore - finalScore;
-        const regressed = finalScore > startScore + 1e-6;
+        const priorityComparison = compareScoreBreakdownLexicographic(final, start);
+        const regressed = priorityComparison > 1e-6;
 
         results.push({
             scenario: scenario.name,
+            start,
+            final,
             startScore,
             finalScore,
             improvement,
             runtimeMs,
             iterations: result.iterations,
+            priorityComparison,
             regressed,
         });
 
@@ -150,6 +159,7 @@ async function runConfig(named: NamedConfig): Promise<ScenarioRun[]> {
                 `start=${startScore.toFixed(1)}`,
                 `final=${finalScore.toFixed(1)}`,
                 `improve=${improvement.toFixed(1)}`,
+                `priority=${priorityComparison < -1e-6 ? 'improved' : priorityComparison > 1e-6 ? 'regressed' : 'tied'}`,
                 `time=${runtimeMs.toFixed(0)}ms`,
                 `iter=${result.iterations}`,
             ].join(' | ') + regressedFlag,
@@ -162,7 +172,7 @@ async function runConfig(named: NamedConfig): Promise<ScenarioRun[]> {
 function printAggregate(label: string, runs: ScenarioRun[]): void {
     const improveStats = summarize(runs.map((run) => run.improvement));
     const finalStats = summarize(runs.map((run) => run.finalScore));
-    const improvedCases = runs.filter((run) => run.improvement > 1e-6).length;
+    const improvedCases = runs.filter((run) => run.priorityComparison < -1e-6).length;
     const regressions = runs.filter((run) => run.regressed).length;
 
     console.log(`\n--- ${label} aggregate ---`);

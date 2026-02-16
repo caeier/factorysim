@@ -93,6 +93,12 @@ export interface GridCell {
   beltConnectionIds: string[]; // can have multiple belts crossing
 }
 
+export interface BeltTileUsage {
+  horizontalCount: number;
+  verticalCount: number;
+  cornerCount: number;
+}
+
 export interface GridState {
   width: number;
   height: number;
@@ -100,6 +106,7 @@ export interface GridState {
   machines: Map<string, Machine>;
   connections: Map<string, Connection>;
   beltPaths: Map<string, BeltPath>;
+  beltTileUsage: Map<string, BeltTileUsage>;
 }
 
 // ─── Helper ──────────────────────────────────────────────

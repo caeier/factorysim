@@ -9,6 +9,7 @@
     "benchmark": "npx tsx src/benchmark.ts",
     "compare:deep": "npx tsx src/deep_search_compare.ts",
     "ablation:next-gains": "npx tsx src/ablation_next_gains.ts",
+    "diagnose:phase-stalls": "npx tsx src/diagnose_phase_stalls.ts",
     "build": "tsc && vite build",
     "preview": "vite preview"
   },
