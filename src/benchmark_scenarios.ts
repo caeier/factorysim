@@ -143,23 +143,25 @@ export function createSeededRandom(seed: number): RandomFn {
 function buildDenseCrossbarScenario(): BenchmarkScenario {
     const sources = Array.from(
         { length: 3 },
-        (_, i) => makeMachine(`crossbar_s${i}`, MachineType.M5x3, 4 + i * 16, 4, Orientation.SOUTH),
+        (_, i) => makeMachine(`crossbar_s${i}`, MachineType.M6x4, 4 + i * 16, 4, Orientation.SOUTH),
     );
     const sinks = Array.from(
         { length: 3 },
-        (_, i) => makeMachine(`crossbar_t${i}`, MachineType.M5x3, 4 + i * 16, 38, Orientation.NORTH),
+        (_, i) => makeMachine(`crossbar_t${i}`, MachineType.M6x4, 4 + i * 16, 38, Orientation.NORTH),
     );
     const machines = [...sources, ...sinks];
     const connections: Connection[] = [];
     let id = 0;
     for (let s = 0; s < sources.length; s++) {
         for (let t = 0; t < sinks.length; t++) {
+            const sourceCount = outputPortCountForType(sources[s].type);
+            const targetCount = inputPortCountForType(sinks[t].type);
             connections.push({
                 id: `crossbar_c${id++}`,
                 sourceMachineId: sources[s].id,
-                sourcePortIndex: (s + t * 2) % 5,
+                sourcePortIndex: (s + t * 2) % sourceCount,
                 targetMachineId: sinks[t].id,
-                targetPortIndex: (t + s * 2) % 5,
+                targetPortIndex: (t + s * 2) % targetCount,
             });
         }
     }
@@ -216,14 +218,14 @@ function buildChokepointCorridorScenario(): BenchmarkScenario {
 function buildMixedSizeCongestionScenario(): BenchmarkScenario {
     const machines: Machine[] = [
         makeMachine('mix_a', MachineType.M5x5, 6, 6, Orientation.SOUTH),
-        makeMachine('mix_b', MachineType.M5x3, 16, 7, Orientation.EAST),
+        makeMachine('mix_b', MachineType.M6x4, 16, 7, Orientation.EAST),
         makeMachine('mix_c', MachineType.M3x3, 25, 8, Orientation.WEST),
         makeMachine('mix_d', MachineType.M5x5, 33, 6, Orientation.NORTH),
         makeMachine('mix_e', MachineType.M3x3, 9, 20, Orientation.EAST),
-        makeMachine('mix_f', MachineType.M5x3, 19, 20, Orientation.SOUTH),
+        makeMachine('mix_f', MachineType.M6x4, 19, 20, Orientation.SOUTH),
         makeMachine('mix_g', MachineType.M5x5, 30, 20, Orientation.WEST),
         makeMachine('mix_h', MachineType.M3x3, 12, 33, Orientation.NORTH),
-        makeMachine('mix_i', MachineType.M5x3, 23, 34, Orientation.WEST),
+        makeMachine('mix_i', MachineType.M6x4, 23, 34, Orientation.WEST),
         makeMachine('mix_j', MachineType.M3x3, 36, 34, Orientation.SOUTH),
     ];
 
@@ -235,9 +237,9 @@ function buildMixedSizeCongestionScenario(): BenchmarkScenario {
     const connections = pairs.map(([srcIdx, tgtIdx], idx) => ({
         id: `mix_c${idx}`,
         sourceMachineId: machines[srcIdx].id,
-        sourcePortIndex: idx % portCountForType(machines[srcIdx].type),
+        sourcePortIndex: idx % outputPortCountForType(machines[srcIdx].type),
         targetMachineId: machines[tgtIdx].id,
-        targetPortIndex: (idx + 1) % portCountForType(machines[tgtIdx].type),
+        targetPortIndex: (idx + 1) % inputPortCountForType(machines[tgtIdx].type),
     }));
 
     return {
@@ -404,8 +406,8 @@ function hasPortCapacity(
     srcIndex: number,
     tgtIndex: number,
 ): boolean {
-    const srcLimit = portCountForType(machines[srcIndex].type);
-    const tgtLimit = portCountForType(machines[tgtIndex].type);
+    const srcLimit = outputPortCountForType(machines[srcIndex].type);
+    const tgtLimit = inputPortCountForType(machines[tgtIndex].type);
     return (outUsage.get(srcIndex) ?? 0) < srcLimit && (inUsage.get(tgtIndex) ?? 0) < tgtLimit;
 }
 
@@ -427,15 +429,31 @@ function makeMachine(
 function pickMachineType(random: RandomFn): MachineType {
     const roll = random();
     if (roll < 0.45) return MachineType.M3x3;
-    if (roll < 0.75) return MachineType.M5x3;
+    if (roll < 0.75) return MachineType.M6x4;
     return MachineType.M5x5;
 }
 
-function portCountForType(type: MachineType): number {
+function outputPortCountForType(type: MachineType): number {
     switch (type) {
+        case MachineType.M3x1:
+            return 1;
         case MachineType.M3x3:
             return 3;
-        case MachineType.M5x3:
+        case MachineType.M6x4:
+            return 6;
+        case MachineType.M5x5:
+            return 5;
+    }
+}
+
+function inputPortCountForType(type: MachineType): number {
+    switch (type) {
+        case MachineType.M3x1:
+            return 0;
+        case MachineType.M3x3:
+            return 3;
+        case MachineType.M6x4:
+            return 6;
         case MachineType.M5x5:
             return 5;
     }

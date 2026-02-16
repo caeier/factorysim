@@ -8,7 +8,7 @@ A browser-based tool for placing machines on a grid, connecting them with convey
 
 ## What it does
 
-You define a factory layout by placing machines of different sizes (3x3, 5x3, 5x5) onto a 50x50 grid. Each machine has input ports and output ports. You connect outputs to inputs, and the system routes conveyor belts between them using A\* pathfinding.
+You define a factory layout by placing machines of different sizes (3x3, 6x4, 5x5, 3x1 anchor) onto a 50x50 grid. Each machine has input ports and output ports (the 3x1 anchor is output-only). You connect outputs to inputs, and the system routes conveyor belts between them using A\* pathfinding.
 
 The optimizer rearranges everything — machine positions, orientations, port assignments, belt routing — to minimize the total score (a weighted sum of belt count, bounding box area, and corner count).
 
@@ -35,7 +35,7 @@ Adaptive operator selection adjusts move probabilities based on recent improveme
 | Connect ports | `C` + click output then input |
 | Delete machine | `D` + click |
 | Rotate | `R` |
-| Machine sizes | `1` / `2` / `3` |
+| Machine sizes | `1` / `2` / `3` / `4` |
 | Optimize | `O` |
 | Deep search | `Shift+O` |
 | Pan | Right-click drag |

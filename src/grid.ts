@@ -6,11 +6,14 @@ import {
     CellType,
     PortType,
     Orientation,
+    MachineType,
     getOrientedDimensions,
-    getPortCount,
+    getInputPortCount,
+    getOutputPortCount,
     orientationToInputDirection,
     orientationToOutputDirection,
     directionToDelta,
+    Direction,
 } from './types';
 
 let nextId = 1;
@@ -83,8 +86,18 @@ export function removeMachine(grid: GridState, machineId: string): void {
 }
 
 export function getMachinePorts(machine: Machine): { inputs: Port[]; outputs: Port[] } {
+    if (machine.type === MachineType.M3x1) {
+        return getAnchorPorts(machine);
+    }
+
     const { width, height } = getOrientedDimensions(machine);
-    const portCount = getPortCount(machine);
+    const inputCount = getInputPortCount(machine);
+    const outputCount = getOutputPortCount(machine);
+    const faceSpan = machine.orientation === Orientation.NORTH || machine.orientation === Orientation.SOUTH
+        ? width
+        : height;
+    const inputOffsets = buildFaceOffsets(inputCount, faceSpan);
+    const outputOffsets = buildFaceOffsets(outputCount, faceSpan);
     const inputDir = orientationToInputDirection(machine.orientation);
     const outputDir = orientationToOutputDirection(machine.orientation);
     const inputApproach = inputDir; // belt must come FROM this direction
@@ -94,37 +107,30 @@ export function getMachinePorts(machine: Machine): { inputs: Port[]; outputs: Po
     const outputs: Port[] = [];
 
     // Compute port positions based on orientation
-    for (let i = 0; i < portCount; i++) {
-        let ix: number, iy: number, ox: number, oy: number;
-
+    for (let i = 0; i < inputOffsets.length; i++) {
+        const offset = inputOffsets[i];
+        let ix: number;
+        let iy: number;
         switch (machine.orientation) {
             case Orientation.NORTH:
-                // Input on north face (top row), output on south face (bottom row)
-                ix = machine.x + i;
+                // Input on north face (top row)
+                ix = machine.x + offset;
                 iy = machine.y;
-                ox = machine.x + i;
-                oy = machine.y + height - 1;
                 break;
             case Orientation.SOUTH:
-                // Input on south face (bottom row), output on north face (top row)
-                ix = machine.x + i;
+                // Input on south face (bottom row)
+                ix = machine.x + offset;
                 iy = machine.y + height - 1;
-                ox = machine.x + i;
-                oy = machine.y;
                 break;
             case Orientation.EAST:
-                // Input on east face (right col), output on west face (left col)
+                // Input on east face (right col)
                 ix = machine.x + width - 1;
-                iy = machine.y + i;
-                ox = machine.x;
-                oy = machine.y + i;
+                iy = machine.y + offset;
                 break;
             case Orientation.WEST:
-                // Input on west face (left col), output on east face (right col)
+                // Input on west face (left col)
                 ix = machine.x;
-                iy = machine.y + i;
-                ox = machine.x + width - 1;
-                oy = machine.y + i;
+                iy = machine.y + offset;
                 break;
         }
 
@@ -136,6 +142,34 @@ export function getMachinePorts(machine: Machine): { inputs: Port[]; outputs: Po
             y: iy,
             approachDirection: inputApproach,
         });
+    }
+
+    for (let i = 0; i < outputOffsets.length; i++) {
+        const offset = outputOffsets[i];
+        let ox: number;
+        let oy: number;
+        switch (machine.orientation) {
+            case Orientation.NORTH:
+                // Output on south face (bottom row)
+                ox = machine.x + offset;
+                oy = machine.y + height - 1;
+                break;
+            case Orientation.SOUTH:
+                // Output on north face (top row)
+                ox = machine.x + offset;
+                oy = machine.y;
+                break;
+            case Orientation.EAST:
+                // Output on west face (left col)
+                ox = machine.x;
+                oy = machine.y + offset;
+                break;
+            case Orientation.WEST:
+                // Output on east face (right col)
+                ox = machine.x + width - 1;
+                oy = machine.y + offset;
+                break;
+        }
 
         outputs.push({
             machineId: machine.id,
@@ -148,6 +182,52 @@ export function getMachinePorts(machine: Machine): { inputs: Port[]; outputs: Po
     }
 
     return { inputs, outputs };
+}
+
+function getAnchorPorts(machine: Machine): { inputs: Port[]; outputs: Port[] } {
+    const { width, height } = getOrientedDimensions(machine);
+    const outputDirection = orientationToInputDirection(machine.orientation);
+    const centerX = machine.x + Math.floor((width - 1) / 2);
+    const centerY = machine.y + Math.floor((height - 1) / 2);
+    let x = centerX;
+    let y = centerY;
+
+    switch (outputDirection) {
+        case Direction.UP:
+            y = machine.y;
+            break;
+        case Direction.DOWN:
+            y = machine.y + height - 1;
+            break;
+        case Direction.LEFT:
+            x = machine.x;
+            break;
+        case Direction.RIGHT:
+            x = machine.x + width - 1;
+            break;
+    }
+
+    return {
+        inputs: [],
+        outputs: [{
+            machineId: machine.id,
+            portType: PortType.OUTPUT,
+            index: 0,
+            x,
+            y,
+            approachDirection: outputDirection,
+        }],
+    };
+}
+
+function buildFaceOffsets(count: number, span: number): number[] {
+    if (count <= 0) return [];
+    if (count === 1) return [Math.floor((span - 1) / 2)];
+    if (count >= span) {
+        return Array.from({ length: count }, (_, i) => Math.min(span - 1, i));
+    }
+    const step = (span - 1) / (count - 1);
+    return Array.from({ length: count }, (_, i) => Math.round(i * step));
 }
 
 /** Get the tile just outside a port (where a belt would start/end) */

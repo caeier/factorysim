@@ -2,11 +2,12 @@
 
 export enum MachineType {
   M3x3 = '3x3',
-  M5x3 = '5x3',
+  M6x4 = '6x4',
   M5x5 = '5x5',
+  M3x1 = '3x1',
 }
 
-/** Orientation = which direction the INPUT ports face */
+/** Orientation = which direction input ports face (or output face for output-only machines). */
 export enum Orientation {
   NORTH = 'NORTH',
   EAST = 'EAST',
@@ -41,8 +42,9 @@ export interface MachineDimensions {
 
 export const MACHINE_DIMS: Record<MachineType, MachineDimensions> = {
   [MachineType.M3x3]: { baseWidth: 3, baseHeight: 3 },
-  [MachineType.M5x3]: { baseWidth: 5, baseHeight: 3 },
+  [MachineType.M6x4]: { baseWidth: 6, baseHeight: 4 },
   [MachineType.M5x5]: { baseWidth: 5, baseHeight: 5 },
+  [MachineType.M3x1]: { baseWidth: 3, baseHeight: 1 },
 };
 
 // ─── Core types ──────────────────────────────────────────
@@ -110,10 +112,56 @@ export function getOrientedDimensions(machine: Machine): { width: number; height
   return { width: dims.baseWidth, height: dims.baseHeight };
 }
 
+export function normalizeMachineType(rawType: unknown): MachineType | null {
+  if (typeof rawType !== 'string') return null;
+  switch (rawType) {
+    case MachineType.M3x3:
+      return MachineType.M3x3;
+    case MachineType.M6x4:
+    case '5x3': // Legacy layout migration
+      return MachineType.M6x4;
+    case MachineType.M5x5:
+      return MachineType.M5x5;
+    case MachineType.M3x1:
+      return MachineType.M3x1;
+    default:
+      return null;
+  }
+}
+
+export function isImmovableMachineType(type: MachineType): boolean {
+  return type === MachineType.M3x1;
+}
+
+export function getInputPortCount(machine: Machine): number {
+  switch (machine.type) {
+    case MachineType.M3x1:
+      return 0;
+    case MachineType.M3x3:
+      return 3;
+    case MachineType.M6x4:
+      return 6;
+    case MachineType.M5x5:
+      return 5;
+  }
+}
+
+export function getOutputPortCount(machine: Machine): number {
+  switch (machine.type) {
+    case MachineType.M3x1:
+      return 1;
+    case MachineType.M3x3:
+      return 3;
+    case MachineType.M6x4:
+      return 6;
+    case MachineType.M5x5:
+      return 5;
+  }
+}
+
+/** @deprecated Prefer `getInputPortCount` / `getOutputPortCount`. */
 export function getPortCount(machine: Machine): number {
-  const dims = MACHINE_DIMS[machine.type];
-  // Ports are on the width face (the wider dimension)
-  return dims.baseWidth;
+  return Math.max(getInputPortCount(machine), getOutputPortCount(machine));
 }
 
 export function oppositeDirection(dir: Direction): Direction {

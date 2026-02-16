@@ -25,11 +25,39 @@ function heuristic(ax: number, ay: number, bx: number, by: number): number {
     return Math.abs(ax - bx) + Math.abs(ay - by);
 }
 
-function nodeKey(x: number, y: number): string {
-    return `${x},${y}`;
+function stateKey(x: number, y: number, direction: Direction | null): string {
+    return `${x},${y},${direction ?? 'NONE'}`;
 }
 
 const DIRECTIONS: Direction[] = [Direction.UP, Direction.DOWN, Direction.LEFT, Direction.RIGHT];
+
+function isCornerSegment(segment: BeltSegment): boolean {
+    return (
+        segment.fromDirection !== null
+        && segment.toDirection !== null
+        && segment.fromDirection !== segment.toDirection
+    );
+}
+
+function hasExistingCornerAtTile(
+    grid: GridState,
+    x: number,
+    y: number,
+    connectionId: string,
+): boolean {
+    const cell = grid.cells[y][x];
+    if (cell.type !== CellType.BELT || cell.beltConnectionIds.length === 0) return false;
+    for (const existingConnId of cell.beltConnectionIds) {
+        if (existingConnId === connectionId) continue;
+        const path = grid.beltPaths.get(existingConnId);
+        if (!path) continue;
+        const segment = path.segments.find((seg) => seg.x === x && seg.y === y);
+        if (segment && isCornerSegment(segment)) {
+            return true;
+        }
+    }
+    return false;
+}
 
 /**
  * Prevents two belts from running parallel on 2+ consecutive shared tiles.
@@ -88,26 +116,26 @@ export function findBeltPath(
     };
 
     openSet.push(startNode);
-    gScores.set(nodeKey(start.x, start.y), 0);
+    gScores.set(stateKey(start.x, start.y, startDir), 0);
 
     while (openSet.size > 0) {
         const current = openSet.pop()!;
-        const currentKey = nodeKey(current.x, current.y);
+        const currentStateKey = stateKey(current.x, current.y, current.direction);
 
         if (current.x === end.x && current.y === end.y) {
             return reconstructPath(current, connectionId);
         }
 
-        if (closedSet.has(currentKey)) continue;
-        closedSet.add(currentKey);
+        if (closedSet.has(currentStateKey)) continue;
+        closedSet.add(currentStateKey);
 
         for (const dir of DIRECTIONS) {
             const delta = directionToDelta(dir);
             const nx = current.x + delta.dx;
             const ny = current.y + delta.dy;
-            const neighborKey = nodeKey(nx, ny);
+            const neighborStateKey = stateKey(nx, ny, dir);
 
-            if (closedSet.has(neighborKey)) continue;
+            if (closedSet.has(neighborStateKey)) continue;
             if (!isInBounds(grid, nx, ny)) continue;
 
             const cell = grid.cells[ny][nx];
@@ -115,14 +143,15 @@ export function findBeltPath(
             if (wouldCauseParallelOverlap(grid, current, nx, ny, connectionId)) continue;
 
             const isTurn = current.direction !== null && current.direction !== dir;
+            if (isTurn && hasExistingCornerAtTile(grid, current.x, current.y, connectionId)) continue;
             const turnCost = isTurn ? 2 : 0;
             const crossingCost = cell.type === CellType.BELT ? 0.5 : 0;
             const tentativeG = current.g + 1 + turnCost + crossingCost;
 
-            const existingG = gScores.get(neighborKey);
+            const existingG = gScores.get(neighborStateKey);
             if (existingG !== undefined && tentativeG >= existingG) continue;
 
-            gScores.set(neighborKey, tentativeG);
+            gScores.set(neighborStateKey, tentativeG);
 
             openSet.push({
                 x: nx,

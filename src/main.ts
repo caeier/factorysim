@@ -5,6 +5,7 @@ import {
   type Port,
   MachineType,
   Orientation,
+  normalizeMachineType,
 } from './types';
 import { createGrid, placeMachine, removeMachine, getMachinePorts, generateId, canPlaceMachine } from './grid';
 import { findBeltPath, applyBeltPath, removeBeltPath } from './pathfinder';
@@ -96,8 +97,9 @@ app.innerHTML = `
     <div class="toolbar-group">
       <span class="toolbar-label">Machine</span>
       <button id="btn-3x3" class="type-btn active" data-type="3x3">3×3 <kbd>1</kbd></button>
-      <button id="btn-5x3" class="type-btn" data-type="5x3">5×3 <kbd>2</kbd></button>
+      <button id="btn-6x4" class="type-btn" data-type="6x4">6×4 <kbd>2</kbd></button>
       <button id="btn-5x5" class="type-btn" data-type="5x5">5×5 <kbd>3</kbd></button>
+      <button id="btn-3x1" class="type-btn" data-type="3x1">3×1 Anchor <kbd>4</kbd></button>
     </div>
     <div class="toolbar-divider"></div>
     <div class="toolbar-group">
@@ -234,7 +236,13 @@ importFileInput.addEventListener('change', () => {
 interface LayoutData {
   version: 1;
   gridSize: number;
-  machines: Machine[];
+  machines: Array<{
+    id: unknown;
+    type: unknown;
+    x: unknown;
+    y: unknown;
+    orientation: unknown;
+  }>;
   connections: Connection[];
 }
 
@@ -270,8 +278,10 @@ function importLayout(json: string): void {
     renderer.setSelectedMachine(null);
 
     // Place machines
-    for (const m of data.machines) {
-      placeMachine(grid, { ...m });
+    for (const rawMachine of data.machines) {
+      const machine = sanitizeImportedMachine(rawMachine);
+      if (!machine) continue;
+      placeMachine(grid, machine);
     }
 
     // Add connections and route belts
@@ -293,10 +303,42 @@ function importLayout(json: string): void {
 
     updateScore();
     requestRender();
-    statusText.textContent = `Imported ${data.machines.length} machines, ${data.connections.length} connections`;
+    statusText.textContent = `Imported ${grid.machines.size} machines, ${data.connections.length} connections`;
   } catch {
     statusText.textContent = 'Failed to import — invalid JSON file';
   }
+}
+
+function sanitizeImportedMachine(rawMachine: unknown): Machine | null {
+  if (!rawMachine || typeof rawMachine !== 'object') return null;
+  const machine = rawMachine as {
+    id?: unknown;
+    type?: unknown;
+    x?: unknown;
+    y?: unknown;
+    orientation?: unknown;
+  };
+  const type = normalizeMachineType(machine.type);
+  if (!type || typeof machine.id !== 'string') return null;
+  if (typeof machine.x !== 'number' || !Number.isFinite(machine.x)) return null;
+  if (typeof machine.y !== 'number' || !Number.isFinite(machine.y)) return null;
+  if (!isOrientation(machine.orientation)) return null;
+  return {
+    id: machine.id,
+    type,
+    x: Math.floor(machine.x),
+    y: Math.floor(machine.y),
+    orientation: machine.orientation,
+  };
+}
+
+function isOrientation(value: unknown): value is Orientation {
+  return (
+    value === Orientation.NORTH
+    || value === Orientation.EAST
+    || value === Orientation.SOUTH
+    || value === Orientation.WEST
+  );
 }
 
 
@@ -322,8 +364,9 @@ document.addEventListener('keydown', (e) => {
       runAutoOptimize(e.shiftKey ? 'deep' : 'normal');
       break;
     case '1': selectMachineType(MachineType.M3x3); break;
-    case '2': selectMachineType(MachineType.M5x3); break;
+    case '2': selectMachineType(MachineType.M6x4); break;
     case '3': selectMachineType(MachineType.M5x5); break;
+    case '4': selectMachineType(MachineType.M3x1); break;
     case 'escape':
       if (deepSearchActive) {
         requestDeepSearchStop();

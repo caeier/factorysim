@@ -4,7 +4,10 @@ import {
     type Connection,
     Orientation,
     getOrientedDimensions,
-    getPortCount,
+    getInputPortCount,
+    getOutputPortCount,
+    isImmovableMachineType,
+    normalizeMachineType,
 } from './types';
 import { createGrid, placeMachine, getMachinePorts, cloneGridState, getPortExternalTile } from './grid';
 import { findBeltPath, applyBeltPath, estimateBeltLength } from './pathfinder';
@@ -62,7 +65,9 @@ interface OptimizerRuntimeConfig {
 
 type MoveOperatorId =
     | 'move_toward_neighbor'
+    | 'move_to_source'
     | 'port_facing_jump'
+    | 'try_different_port'
     | 'random_shift'
     | 'swap_positions'
     | 'rotate_best'
@@ -145,6 +150,26 @@ const UNROUTABLE_BASE_PENALTY = 2000;
 const UNROUTABLE_PER_CONNECTION_PENALTY = 60;
 const UNROUTABLE_PER_MACHINE_PENALTY = 25;
 
+function buildFixedMachineMap(machines: Machine[]): Map<string, Machine> {
+    const fixed = new Map<string, Machine>();
+    for (const machine of machines) {
+        if (!isImmovableMachineType(machine.type)) continue;
+        fixed.set(machine.id, { ...machine });
+    }
+    return fixed;
+}
+
+function enforceFixedMachines(machines: Machine[], fixedMachines: Map<string, Machine>): void {
+    if (fixedMachines.size === 0) return;
+    for (const machine of machines) {
+        const fixed = fixedMachines.get(machine.id);
+        if (!fixed) continue;
+        machine.x = fixed.x;
+        machine.y = fixed.y;
+        machine.orientation = fixed.orientation;
+    }
+}
+
 // ─────────────────────────────────────────────────────────
 // PUBLIC API
 // ─────────────────────────────────────────────────────────
@@ -167,6 +192,8 @@ export async function runOptimizer(
 
     const machines = Array.from(grid.machines.values()).map((m) => ({ ...m }));
     const connections = Array.from(grid.connections.values()).map((c) => ({ ...c }));
+    const fixedMachines = buildFixedMachineMap(machines);
+    const hasFixedMachines = fixedMachines.size > 0;
 
     if (machines.length === 0) {
         return { grid: cloneGridState(grid), score: evaluateGrid(grid), iterations: 0 };
@@ -209,6 +236,7 @@ export async function runOptimizer(
         score: baselineScore,
     };
     const rememberFallback = (candidateMachines: Machine[], candidateConnections: Connection[]): void => {
+        enforceFixedMachines(candidateMachines, fixedMachines);
         const built = buildGrid(candidateMachines, candidateConnections, W, H);
         if (!built) return;
         const score = evaluateGrid(built);
@@ -218,6 +246,7 @@ export async function runOptimizer(
     };
     const rememberElite = (candidateMachines: Machine[], candidateConnections: Connection[]): void => {
         if (config.elitePoolSize <= 0) return;
+        enforceFixedMachines(candidateMachines, fixedMachines);
         const fingerprint = buildLayoutFingerprint(candidateMachines);
         const routed = buildAndScore(candidateMachines, candidateConnections, W, H);
         const routedScore = routed?.score.totalScore;
@@ -280,7 +309,16 @@ export async function runOptimizer(
         let kicked = seedMachines.map((m) => ({ ...m }));
         const kickMoves = 1 + Math.floor(random() * 2);
         for (let i = 0; i < kickMoves; i++) {
-            kicked = perturbSmart(kicked, connections, W, H, random, operatorConfig);
+            kicked = perturbSmart(
+                kicked,
+                connections,
+                W,
+                H,
+                random,
+                operatorConfig,
+                undefined,
+                new Set(fixedMachines.keys()),
+            );
         }
         if (scorePlacement(kicked, connections, W, H, useFastScore) < Infinity) {
             return kicked;
@@ -295,7 +333,8 @@ export async function runOptimizer(
     rememberElite(machines, connections);
 
     // ── Phase 0: Build deterministic seeds and pick the best ──
-    const seedCandidates: { name: string; machines: Machine[] }[] = config.useExplorationSeeds
+    const useExplorationSeeds = config.useExplorationSeeds && !hasFixedMachines;
+    const seedCandidates: { name: string; machines: Machine[] }[] = useExplorationSeeds
         ? [
             { name: 'Greedy placement', machines: portAwareGreedyPlace(machines, connections, W, H) },
             { name: 'Layered topology placement', machines: topologyAwareLayeredPlace(machines, connections, W, H) },
@@ -303,7 +342,7 @@ export async function runOptimizer(
         ]
         : [{ name: 'Current layout', machines: machines.map((m) => ({ ...m })) }];
 
-    if (config.useExplorationSeeds) {
+    if (useExplorationSeeds) {
         const patternSeed = patternAwarePlace(machines, connections, W, H);
         if (patternSeed) {
             seedCandidates.unshift({ name: 'Pattern-aware placement', machines: patternSeed });
@@ -325,6 +364,7 @@ export async function runOptimizer(
 
         const candidateMachines = seed.machines.map((m) => ({ ...m }));
         const candidateConnections = connections.map((c) => ({ ...c }));
+        enforceFixedMachines(candidateMachines, fixedMachines);
         optimizePortAssignments(candidateMachines, candidateConnections, W, H);
 
         rememberFallback(candidateMachines, candidateConnections);
@@ -378,6 +418,7 @@ export async function runOptimizer(
                 random,
                 shouldStop: shouldStopForBudget,
                 operators: operatorConfig,
+                fixedMachineIds: new Set(fixedMachines.keys()),
             },
             (best, iter) => {
                 runIterations = iter;
@@ -390,6 +431,7 @@ export async function runOptimizer(
         );
 
         totalIter += runIterations;
+        enforceFixedMachines(phase1Machines, fixedMachines);
         rememberFallback(phase1Machines, connections);
         rememberElite(phase1Machines, connections);
 
@@ -407,6 +449,7 @@ export async function runOptimizer(
 
     // ── Phase 1.5: Early port assignment optimization ──
     const phase1PortOpt = optimizePortAssignments(phase1Best, connections, W, H);
+    enforceFixedMachines(phase1PortOpt, fixedMachines);
     rememberFallback(phase1PortOpt, connections);
     rememberElite(phase1PortOpt, connections);
 
@@ -430,6 +473,7 @@ export async function runOptimizer(
                 random,
                 shouldStop: shouldStopForBudget,
                 operators: operatorConfig,
+                fixedMachineIds: new Set(fixedMachines.keys()),
             },
             (best, iter) => {
                 runIterations = iter;
@@ -442,6 +486,7 @@ export async function runOptimizer(
         );
 
         totalIter += runIterations;
+        enforceFixedMachines(phase2Machines, fixedMachines);
         rememberFallback(phase2Machines, connections);
         rememberElite(phase2Machines, connections);
 
@@ -459,6 +504,7 @@ export async function runOptimizer(
 
     // ── Phase 3: Final port assignment optimization ────
     const phase3Machines = optimizePortAssignments(phase2Best, connections, W, H);
+    enforceFixedMachines(phase3Machines, fixedMachines);
     rememberFallback(phase3Machines, connections);
     rememberElite(phase3Machines, connections);
 
@@ -468,10 +514,10 @@ export async function runOptimizer(
     for (let pass = 0; pass < polishPasses; pass++) {
         if (shouldStopForBudget()) break;
 
-        const compacted = compactLayout(polished, connections, W, H);
+        const compacted = compactLayout(polished, connections, W, H, fixedMachines);
         rememberFallback(compacted, connections);
         rememberElite(compacted, connections);
-        polished = optimizeOrientationsUsingAStar(compacted, connections, W, H);
+        polished = optimizeOrientationsUsingAStar(compacted, connections, W, H, fixedMachines);
         rememberFallback(polished, connections);
         rememberElite(polished, connections);
 
@@ -490,6 +536,7 @@ export async function runOptimizer(
                     random,
                     shouldStop: shouldStopForBudget,
                     operators: operatorConfig,
+                    fixedMachineIds: new Set(fixedMachines.keys()),
                 },
                 (best, iter) => {
                     runIterations = iter;
@@ -502,6 +549,7 @@ export async function runOptimizer(
                 },
             );
             totalIter += runIterations;
+            enforceFixedMachines(polishedBySA, fixedMachines);
             rememberFallback(polishedBySA, connections);
             rememberElite(polishedBySA, connections);
             polished = polishedBySA;
@@ -518,6 +566,7 @@ export async function runOptimizer(
         }
     }
 
+    enforceFixedMachines(polished, fixedMachines);
     rememberElite(polished, connections);
     const finalResult = buildGrid(polished, connections, W, H);
     if (finalResult) {
@@ -715,9 +764,10 @@ function parseIncomingEliteArchive(value: unknown): SerializedEliteArchiveEntry[
         for (const rawMachine of machinesRaw) {
             if (!rawMachine || typeof rawMachine !== 'object') continue;
             const machine = rawMachine as Partial<Machine>;
+            const type = normalizeMachineType(machine.type);
             if (
                 typeof machine.id !== 'string'
-                || typeof machine.type !== 'string'
+                || !type
                 || typeof machine.x !== 'number'
                 || !Number.isFinite(machine.x)
                 || typeof machine.y !== 'number'
@@ -728,7 +778,7 @@ function parseIncomingEliteArchive(value: unknown): SerializedEliteArchiveEntry[
             }
             machines.push({
                 id: machine.id,
-                type: machine.type as Machine['type'],
+                type,
                 x: machine.x,
                 y: machine.y,
                 orientation: machine.orientation as Orientation,
@@ -1791,8 +1841,10 @@ function optimizeOrientationsUsingAStar(
     connections: Connection[],
     gridW: number,
     gridH: number,
+    fixedMachines: Map<string, Machine> = new Map(),
 ): Machine[] {
     const result = machines.map((m) => ({ ...m }));
+    enforceFixedMachines(result, fixedMachines);
 
     // Score the current layout
     let currentBest = scorePlacement(result, connections, gridW, gridH, false);
@@ -1802,6 +1854,7 @@ function optimizeOrientationsUsingAStar(
 
     // Try rotating each machine and keep improvement
     for (const machine of result) {
+        if (fixedMachines.has(machine.id)) continue;
         const origOrient = machine.orientation;
         let bestOrient = origOrient;
         let bestScore = currentBest;
@@ -1849,6 +1902,7 @@ interface SAConfig {
     random?: RandomFn;
     shouldStop?: () => boolean;
     maxIterations?: number;
+    fixedMachineIds?: Set<string>;
 }
 
 function runSAAsync(
@@ -1861,6 +1915,11 @@ function runSAAsync(
 ): Promise<Machine[]> {
     return new Promise((resolve) => {
         let current = startMachines.map((m) => ({ ...m }));
+        const fixedMachineIds = config.fixedMachineIds ?? new Set<string>();
+        if (fixedMachineIds.size > 0) {
+            const fixedSnapshots = buildFixedMachineMap(current);
+            enforceFixedMachines(current, fixedSnapshots);
+        }
         let currentScore = scorePlacement(current, connections, gridW, gridH, config.useFastScore);
         let best = current.map((m) => ({ ...m }));
         let bestScore = currentScore;
@@ -1981,6 +2040,7 @@ function runSAAsync(
                         random,
                         activeOperatorConfig,
                         chosenOperator.id,
+                        fixedMachineIds,
                     );
                     const candidateScore = scorePlacement(candidate, connections, gridW, gridH, config.useFastScore);
                     const stats = operatorStats.get(chosenOperator.id)!;
@@ -2320,12 +2380,14 @@ function buildMoveOperators(operatorConfig?: SAOperatorConfig): MoveOperator[] {
     const criticalFloor = criticalNetRate > 1e-9 ? Math.min(0.02, criticalNetRate * 0.35) : 0;
     const sharedScale = Math.max(0.05, 1 - largeMoveRate);
     return [
-        { id: 'move_toward_neighbor', baseWeight: 0.25 * sharedScale, minProbability: 0.02 },
-        { id: 'port_facing_jump', baseWeight: 0.15 * sharedScale, minProbability: 0.02 },
-        { id: 'random_shift', baseWeight: 0.15 * sharedScale, minProbability: 0.02 },
-        { id: 'swap_positions', baseWeight: 0.15 * sharedScale, minProbability: 0.02 },
-        { id: 'rotate_best', baseWeight: 0.15 * sharedScale, minProbability: 0.02 },
-        { id: 'joint_move_rotate', baseWeight: 0.15 * sharedScale, minProbability: 0.02 },
+        { id: 'move_toward_neighbor', baseWeight: 0.2 * sharedScale, minProbability: 0.02 },
+        { id: 'move_to_source', baseWeight: 0.12 * sharedScale, minProbability: 0.02 },
+        { id: 'port_facing_jump', baseWeight: 0.14 * sharedScale, minProbability: 0.02 },
+        { id: 'try_different_port', baseWeight: 0.12 * sharedScale, minProbability: 0.02 },
+        { id: 'random_shift', baseWeight: 0.13 * sharedScale, minProbability: 0.02 },
+        { id: 'swap_positions', baseWeight: 0.11 * sharedScale, minProbability: 0.02 },
+        { id: 'rotate_best', baseWeight: 0.09 * sharedScale, minProbability: 0.02 },
+        { id: 'joint_move_rotate', baseWeight: 0.09 * sharedScale, minProbability: 0.02 },
         {
             id: 'cluster_destroy_repair',
             baseWeight: clusterRate,
@@ -2358,8 +2420,11 @@ function perturbSmart(
     random: RandomFn = Math.random,
     operatorConfig?: SAOperatorConfig,
     forcedOperator?: MoveOperatorId,
+    fixedMachineIds: Set<string> = new Set(),
 ): Machine[] {
     const result = machines.map((m) => ({ ...m }));
+    const movableIndexes = getMovableMachineIndexes(result, fixedMachineIds);
+    if (movableIndexes.length === 0) return result;
     const operators = buildMoveOperators(operatorConfig);
     const operator = forcedOperator
         ? operators.find((item) => item.id === forcedOperator) ?? operators[0]
@@ -2370,13 +2435,19 @@ function perturbSmart(
 
     switch (operator.id) {
         case 'move_toward_neighbor':
-            moveTowardNeighbor(result, connections, random);
+            moveTowardNeighbor(result, connections, gridW, gridH, random, fixedMachineIds);
+            break;
+        case 'move_to_source':
+            moveToSource(result, connections, gridW, gridH, random, fixedMachineIds);
             break;
         case 'port_facing_jump':
-            portFacingJump(result, connections, gridW, gridH, random);
+            portFacingJump(result, connections, gridW, gridH, random, fixedMachineIds);
+            break;
+        case 'try_different_port':
+            tryDifferentPortAssignment(result, connections, random, fixedMachineIds);
             break;
         case 'random_shift': {
-            const idx = Math.floor(random() * result.length);
+            const idx = movableIndexes[Math.floor(random() * movableIndexes.length)];
             const shift = Math.floor(random() * 3) + 1;
             const dir = Math.floor(random() * 4);
             switch (dir) {
@@ -2385,14 +2456,16 @@ function perturbSmart(
                 case 2: result[idx].y += shift; break;
                 case 3: result[idx].y -= shift; break;
             }
-            result[idx].x = Math.max(0, Math.min(gridW - 1, result[idx].x));
-            result[idx].y = Math.max(0, Math.min(gridH - 1, result[idx].y));
+            const dims = getOrientedDimensions(result[idx]);
+            result[idx].x = Math.max(0, Math.min(gridW - dims.width, result[idx].x));
+            result[idx].y = Math.max(0, Math.min(gridH - dims.height, result[idx].y));
             break;
         }
         case 'swap_positions':
-            if (result.length > 1) {
-                const i = Math.floor(random() * result.length);
-                const j = (i + 1 + Math.floor(random() * (result.length - 1))) % result.length;
+            if (movableIndexes.length > 1) {
+                const i = movableIndexes[Math.floor(random() * movableIndexes.length)];
+                const otherIndexes = movableIndexes.filter((idx) => idx !== i);
+                const j = otherIndexes[Math.floor(random() * otherIndexes.length)];
                 const tmpX = result[i].x;
                 const tmpY = result[i].y;
                 result[i].x = result[j].x;
@@ -2402,7 +2475,7 @@ function perturbSmart(
             }
             break;
         case 'rotate_best': {
-            const idx = Math.floor(random() * result.length);
+            const idx = movableIndexes[Math.floor(random() * movableIndexes.length)];
             const machineMap = new Map(result.map((m) => [m.id, m]));
             let bestOrient = result[idx].orientation;
             let bestDist = Infinity;
@@ -2429,7 +2502,7 @@ function perturbSmart(
             break;
         }
         case 'joint_move_rotate': {
-            const idx = Math.floor(random() * result.length);
+            const idx = movableIndexes[Math.floor(random() * movableIndexes.length)];
             const shift = Math.floor(random() * 2) + 1;
             const dir = Math.floor(random() * 4);
             switch (dir) {
@@ -2438,8 +2511,9 @@ function perturbSmart(
                 case 2: result[idx].y += shift; break;
                 case 3: result[idx].y -= shift; break;
             }
-            result[idx].x = Math.max(0, Math.min(gridW - 1, result[idx].x));
-            result[idx].y = Math.max(0, Math.min(gridH - 1, result[idx].y));
+            const dims = getOrientedDimensions(result[idx]);
+            result[idx].x = Math.max(0, Math.min(gridW - dims.width, result[idx].x));
+            result[idx].y = Math.max(0, Math.min(gridH - dims.height, result[idx].y));
             result[idx].orientation = ORIENTATIONS[Math.floor(random() * 4)];
             break;
         }
@@ -2459,6 +2533,7 @@ function perturbSmart(
                     clusterMinSize,
                     clusterMaxSize,
                     candidateRandom,
+                    fixedMachineIds,
                 ),
             );
             break;
@@ -2478,12 +2553,22 @@ function perturbSmart(
                     clusterMinSize,
                     clusterMaxSize,
                     candidateRandom,
+                    fixedMachineIds,
                 ),
             );
             break;
     }
 
     return result;
+}
+
+function getMovableMachineIndexes(machines: Machine[], fixedMachineIds: Set<string>): number[] {
+    const movable: number[] = [];
+    for (let i = 0; i < machines.length; i++) {
+        if (fixedMachineIds.has(machines[i].id)) continue;
+        movable.push(i);
+    }
+    return movable;
 }
 
 function applyDestroyRepairCluster(
@@ -2494,15 +2579,19 @@ function applyDestroyRepairCluster(
     minSize: number,
     maxSize: number,
     random: RandomFn,
+    fixedMachineIds: Set<string>,
     forcedClusterIds?: string[],
 ): boolean {
-    if (machines.length < 2 || connections.length === 0) return false;
+    const movableIds = machines
+        .map((machine) => machine.id)
+        .filter((id) => !fixedMachineIds.has(id));
+    if (movableIds.length < 2 || connections.length === 0) return false;
 
     const machineMap = new Map(machines.map((m) => [m.id, m]));
     const adjacency = buildAdjacencyWeights(connections);
     const clusterIds = forcedClusterIds && forcedClusterIds.length > 0
-        ? Array.from(new Set(forcedClusterIds.filter((id) => machineMap.has(id))))
-        : pickConnectedCluster(machines, adjacency, minSize, maxSize, random);
+        ? Array.from(new Set(forcedClusterIds.filter((id) => machineMap.has(id) && !fixedMachineIds.has(id))))
+        : pickConnectedCluster(machines, adjacency, minSize, maxSize, random, fixedMachineIds);
     if (clusterIds.length < 2) return false;
 
     const clusterSet = new Set(clusterIds);
@@ -2599,6 +2688,7 @@ function applyCriticalNetFocusedMove(
     clusterMinSize: number,
     clusterMaxSize: number,
     random: RandomFn,
+    fixedMachineIds: Set<string>,
 ): boolean {
     if (machines.length < 2 || connections.length === 0) return false;
     const machineMap = new Map(machines.map((machine) => [machine.id, machine]));
@@ -2629,6 +2719,9 @@ function applyCriticalNetFocusedMove(
         targetConnection.sourceMachineId,
         targetConnection.targetMachineId,
     ]);
+    for (const id of Array.from(seedCluster)) {
+        if (fixedMachineIds.has(id)) seedCluster.delete(id);
+    }
     const targetClusterSize = Math.max(
         2,
         Math.min(
@@ -2641,6 +2734,7 @@ function applyCriticalNetFocusedMove(
         .map(([id]) => id);
     for (const id of rankedMachineIds) {
         if (seedCluster.size >= targetClusterSize) break;
+        if (fixedMachineIds.has(id)) continue;
         seedCluster.add(id);
     }
 
@@ -2653,6 +2747,7 @@ function applyCriticalNetFocusedMove(
             seedCluster.size,
             seedCluster.size,
             random,
+            fixedMachineIds,
             Array.from(seedCluster),
         );
         if (clustered) return true;
@@ -2661,7 +2756,9 @@ function applyCriticalNetFocusedMove(
     const fallbackOrder = [
         targetConnection.sourceMachineId,
         targetConnection.targetMachineId,
-    ].sort((a, b) => (machinePain.get(b) ?? 0) - (machinePain.get(a) ?? 0));
+    ]
+        .filter((id) => !fixedMachineIds.has(id))
+        .sort((a, b) => (machinePain.get(b) ?? 0) - (machinePain.get(a) ?? 0));
     for (const machineId of fallbackOrder) {
         const machine = machineMap.get(machineId);
         if (!machine) continue;
@@ -2737,14 +2834,16 @@ function pickConnectedCluster(
     minSize: number,
     maxSize: number,
     random: RandomFn,
+    fixedMachineIds: Set<string>,
 ): string[] {
-    if (machines.length === 0) return [];
+    const movableMachines = machines.filter((machine) => !fixedMachineIds.has(machine.id));
+    if (movableMachines.length === 0) return [];
 
-    const boundedMin = Math.max(2, Math.min(minSize, machines.length));
-    const boundedMax = Math.max(boundedMin, Math.min(maxSize, machines.length));
+    const boundedMin = Math.max(2, Math.min(minSize, movableMachines.length));
+    const boundedMax = Math.max(boundedMin, Math.min(maxSize, movableMachines.length));
     const targetSize = boundedMin + Math.floor(random() * (boundedMax - boundedMin + 1));
 
-    const start = machines[Math.floor(random() * machines.length)].id;
+    const start = movableMachines[Math.floor(random() * movableMachines.length)].id;
     const selected = new Set<string>([start]);
 
     while (selected.size < targetSize) {
@@ -2754,6 +2853,7 @@ function pickConnectedCluster(
             if (!neighbors) continue;
             for (const [neighborId, weight] of neighbors) {
                 if (selected.has(neighborId)) continue;
+                if (fixedMachineIds.has(neighborId)) continue;
                 candidates.set(neighborId, (candidates.get(neighborId) ?? 0) + weight);
             }
         }
@@ -2900,8 +3000,17 @@ function estimateMachineConnectionCost(
     return totalDist;
 }
 
-function moveTowardNeighbor(machines: Machine[], connections: Connection[], random: RandomFn): void {
-    const idx = Math.floor(random() * machines.length);
+function moveTowardNeighbor(
+    machines: Machine[],
+    connections: Connection[],
+    gridW: number,
+    gridH: number,
+    random: RandomFn,
+    fixedMachineIds: Set<string>,
+): void {
+    const movableIndexes = getMovableMachineIndexes(machines, fixedMachineIds);
+    if (movableIndexes.length === 0) return;
+    const idx = movableIndexes[Math.floor(random() * movableIndexes.length)];
     const machine = machines[idx];
 
     const neighborCounts = new Map<string, number>();
@@ -2934,6 +3043,114 @@ function moveTowardNeighbor(machines: Machine[], connections: Connection[], rand
     const step = Math.floor(random() * 3) + 1;
     machine.x += dx * step;
     machine.y += dy * step;
+    const dims = getOrientedDimensions(machine);
+    machine.x = Math.max(0, Math.min(gridW - dims.width, machine.x));
+    machine.y = Math.max(0, Math.min(gridH - dims.height, machine.y));
+}
+
+function moveToSource(
+    machines: Machine[],
+    connections: Connection[],
+    gridW: number,
+    gridH: number,
+    random: RandomFn,
+    fixedMachineIds: Set<string>,
+): void {
+    const machineMap = new Map(machines.map((m) => [m.id, m]));
+    const candidates = machines.filter((m) => {
+        if (fixedMachineIds.has(m.id)) return false;
+        return connections.some((conn) => conn.targetMachineId === m.id);
+    });
+    if (candidates.length === 0) return;
+
+    const machine = candidates[Math.floor(random() * candidates.length)];
+    let totalX = 0;
+    let totalY = 0;
+    let count = 0;
+    for (const conn of connections) {
+        if (conn.targetMachineId !== machine.id) continue;
+        const source = machineMap.get(conn.sourceMachineId);
+        if (!source) continue;
+        totalX += source.x;
+        totalY += source.y;
+        count++;
+    }
+    if (count === 0) return;
+
+    const targetX = totalX / count;
+    const targetY = totalY / count;
+    const dx = Math.sign(targetX - machine.x);
+    const dy = Math.sign(targetY - machine.y);
+    const majorStep = 1 + Math.floor(random() * 2);
+
+    if (Math.abs(targetX - machine.x) >= Math.abs(targetY - machine.y)) {
+        machine.x += dx * majorStep;
+        if (random() < 0.6) machine.y += dy;
+    } else {
+        machine.y += dy * majorStep;
+        if (random() < 0.6) machine.x += dx;
+    }
+
+    const dims = getOrientedDimensions(machine);
+    machine.x = Math.max(0, Math.min(gridW - dims.width, machine.x));
+    machine.y = Math.max(0, Math.min(gridH - dims.height, machine.y));
+}
+
+function tryDifferentPortAssignment(
+    machines: Machine[],
+    connections: Connection[],
+    random: RandomFn,
+    fixedMachineIds: Set<string>,
+): void {
+    const machineMap = new Map(machines.map((m) => [m.id, m]));
+    const eligibleConnections = connections.filter((conn) => (
+        !fixedMachineIds.has(conn.sourceMachineId) || !fixedMachineIds.has(conn.targetMachineId)
+    ));
+    if (eligibleConnections.length === 0) return;
+    const conn = eligibleConnections[Math.floor(random() * eligibleConnections.length)];
+    const src = machineMap.get(conn.sourceMachineId);
+    const tgt = machineMap.get(conn.targetMachineId);
+    if (!src || !tgt) return;
+
+    const srcPortCount = getOutputPortCount(src);
+    const tgtPortCount = getInputPortCount(tgt);
+    if (srcPortCount <= 0 || tgtPortCount <= 0) return;
+
+    const usedOutputPorts = new Set<number>();
+    const usedInputPorts = new Set<number>();
+    for (const other of connections) {
+        if (other.id === conn.id) continue;
+        if (other.sourceMachineId === src.id) usedOutputPorts.add(other.sourcePortIndex);
+        if (other.targetMachineId === tgt.id) usedInputPorts.add(other.targetPortIndex);
+    }
+
+    const srcPorts = getMachinePorts(src).outputs;
+    const tgtPorts = getMachinePorts(tgt).inputs;
+    let bestSrcIdx = conn.sourcePortIndex;
+    let bestTgtIdx = conn.targetPortIndex;
+    let bestDist = Infinity;
+
+    for (let si = 0; si < srcPortCount; si++) {
+        if (usedOutputPorts.has(si)) continue;
+        const srcPort = srcPorts[si];
+        if (!srcPort) continue;
+        for (let ti = 0; ti < tgtPortCount; ti++) {
+            if (usedInputPorts.has(ti)) continue;
+            const tgtPort = tgtPorts[ti];
+            if (!tgtPort) continue;
+            const dist = estimateBeltLength(srcPort, tgtPort);
+            if (dist < bestDist) {
+                bestDist = dist;
+                bestSrcIdx = si;
+                bestTgtIdx = ti;
+            }
+        }
+    }
+
+    if (bestDist < Infinity) {
+        conn.sourcePortIndex = bestSrcIdx;
+        conn.targetPortIndex = bestTgtIdx;
+    }
 }
 
 /**
@@ -2948,8 +3165,11 @@ function portFacingJump(
     gridW: number,
     gridH: number,
     random: RandomFn,
+    fixedMachineIds: Set<string>,
 ): void {
-    const idx = Math.floor(random() * machines.length);
+    const movableIndexes = getMovableMachineIndexes(machines, fixedMachineIds);
+    if (movableIndexes.length === 0) return;
+    const idx = movableIndexes[Math.floor(random() * movableIndexes.length)];
     const machine = machines[idx];
 
     // Find most-connected neighbor
@@ -3075,8 +3295,9 @@ function optimizePortAssignments(
         if (!src || !tgt) continue;
         const srcPorts = getMachinePorts(src);
         const tgtPorts = getMachinePorts(tgt);
-        const srcPortCount = getPortCount(src);
-        const tgtPortCount = getPortCount(tgt);
+        const srcPortCount = getOutputPortCount(src);
+        const tgtPortCount = getInputPortCount(tgt);
+        if (srcPortCount <= 0 || tgtPortCount <= 0) continue;
 
         const srcUsed = usedOutputPorts.get(src.id) || new Set();
         const tgtUsed = usedInputPorts.get(tgt.id) || new Set();
@@ -3151,23 +3372,30 @@ function compactLayout(
     connections: Connection[],
     gridW: number,
     gridH: number,
+    fixedMachines: Map<string, Machine> = new Map(),
 ): Machine[] {
     const baseline = machines.map((m) => ({ ...m }));
+    enforceFixedMachines(baseline, fixedMachines);
     const baselineScore = scorePlacement(baseline, connections, gridW, gridH, false);
     const result = baseline.map((m) => ({ ...m }));
+    enforceFixedMachines(result, fixedMachines);
     const allIds = new Set(result.map((m) => m.id));
 
     // Shift bounding box to (1,1)
     let minX = Infinity, minY = Infinity;
     for (const m of result) {
+        if (fixedMachines.has(m.id)) continue;
         minX = Math.min(minX, m.x);
         minY = Math.min(minY, m.y);
     }
-    const shiftX = minX - 1;
-    const shiftY = minY - 1;
-    for (const m of result) {
-        m.x -= shiftX;
-        m.y -= shiftY;
+    if (Number.isFinite(minX) && Number.isFinite(minY)) {
+        const shiftX = minX - 1;
+        const shiftY = minY - 1;
+        for (const m of result) {
+            if (fixedMachines.has(m.id)) continue;
+            m.x -= shiftX;
+            m.y -= shiftY;
+        }
     }
 
     // Repeatedly slide each machine left and up
@@ -3179,6 +3407,7 @@ function compactLayout(
         result.sort((a, b) => (a.x + a.y) - (b.x + b.y));
 
         for (const machine of result) {
+            if (fixedMachines.has(machine.id)) continue;
             while (machine.x > 0) {
                 machine.x--;
                 if (!isValidPlacement(machine, result, allIds, gridW, gridH)) {
@@ -3196,6 +3425,7 @@ function compactLayout(
                 improved = true;
             }
         }
+        enforceFixedMachines(result, fixedMachines);
     }
 
     const compactedScore = scorePlacement(result, connections, gridW, gridH, false);
