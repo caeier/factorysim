@@ -1,10 +1,8 @@
 # Factory Grid Simulator
 
+[🚀 Live Demo](https://caeier.github.io/factorysim/)
+
 A browser-based tool for placing machines on a grid, connecting them with conveyor belts, and automatically optimizing the layout for minimal space and belt usage.
-
-**[Try it live](https://caeier.github.io/factorysim/)**
-
----
 
 ## What it does
 
@@ -46,14 +44,14 @@ Layouts can be exported and imported as JSON.
 
 ## Running locally
 
-```
+```bash
 npm install
 npm run dev
 ```
 
 ## Building
 
-```
+```bash
 npm run build
 ```
 
